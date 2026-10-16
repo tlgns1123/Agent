@@ -323,9 +323,6 @@ async function cmdModel(args, state) {
   // ── /model <name>  (switch) ───────────────────────────────────────────────
   state.model    = sub;
   state.toolMode = 'auto';
-  // 라우터 기준선(빠른 모델)도 사용자의 수동 선택으로 갱신 → 다음 Q&A 턴에 옛 모델로 되돌아가지 않음.
-  state._baseModel = sub;
-  state._nonAgentStreak = 0;
   printSystem(`모델 전환: ${chalk.cyan(sub)}`);
   await state.memory.updateModelSection(sub, state.contextLength, state.config, state._github).catch(() => {});
 }

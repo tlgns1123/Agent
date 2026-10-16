@@ -28,9 +28,8 @@ import { MemoryManager }                            from './memory.js';
 import { PluginManager }                            from './plugins.js';
 import { SessionManager }                           from './session.js';
 import { loadMcpServers }                           from './mcp.js';
-import { routerEnabled, agentModelName, agentIters, needsAgent, AGENT_DIRECTIVE, routerSticky, stickyN } from './router.js';
+import { agentIters, AGENT_DIRECTIVE } from './router.js';
 import { isCommand, handleCommand } from './commands.js';
-import { extractXmlToolCalls, buildXmlFallbackPrompt, extractJsonToolCalls } from './xmlTools.js';
 import { PermissionManager, makeAskFn }              from './permissions.js';
 import { BackupManager }                             from './backup.js';
 import { getGitContext, githubFetchIssue }           from './git.js';
@@ -294,21 +293,8 @@ async function main() {
 
   printWelcome(state.model);
 
-  // ── 모델 라우터 초기화 (툴/코딩 턴 → 에이전트 모델) ──────────────────────
-  state._baseModel  = state.model;
-  state._agentModel = null;
+  // 단일 모델(네이티브 툴콜) 전제 — 라우터/모델스왑 없음. 에이전트 턴 반복상한만 둔다.
   state._turnMaxIter = null;
-  state._nonAgentStreak = 0;
-  if (routerEnabled()) {
-    try {
-      const installed = (await listModels()).map((m) => m.name ?? m.model ?? m);
-      const agent = agentModelName();
-      if (installed.includes(agent) && agent !== state._baseModel) {
-        state._agentModel = agent;
-        printSystem(`🧭 라우터 ON — 툴/코딩·리버싱 작업은 ${chalk.cyan(agent)}로 자동 전환 (Q&A는 ${state._baseModel}). 끄려면 OH_ROUTER=off`);
-      }
-    } catch { /* 모델 목록 실패 → 라우터 비활성 */ }
-  }
 
   // ── 실행 격리(샌드박스) 상태 표시 + 안전점검 ─────────────────────────────
   if (sandboxEnabled()) {
@@ -500,35 +486,10 @@ async function main() {
       // ── 지식 근거 확보: RAG(지식DB) 먼저 → 없으면 신뢰소스(NVD)/웹 자동 폴백 ──
       await autoGround(state, expandedInput);
 
-      // ── 모델 라우팅: 툴/코딩 의도면 에이전트 모델 + 행동지시문 + 반복상향 ──
-      state._turnMaxIter = null;
-      let turnSystemPrompt = state._systemPrompt;
-      if (state._agentModel) {
-        const agentic = needsAgent(expandedInput);
-        if (agentic) {
-          state._nonAgentStreak = 0;
-          if (state.model !== state._agentModel) {
-            state.model = state._agentModel;
-            printSystem(chalk.cyan(`🤖 에이전트 모델 → ${state._agentModel} (툴/코딩 작업)`));
-          }
-          turnSystemPrompt = `${state._systemPrompt}\n\n---\n\n${AGENT_DIRECTIVE}`;
-          state._turnMaxIter = agentIters();
-        } else if (state.model === state._agentModel) {
-          // 에이전트에 머무는 중 비에이전트 턴 → 스티키 히스테리시스(끼어든 질문에 반사적 리로드 방지)
-          state._nonAgentStreak = (state._nonAgentStreak ?? 0) + 1;
-          if (!routerSticky() || state._nonAgentStreak >= stickyN()) {
-            state.model = state._baseModel;
-            state._nonAgentStreak = 0;
-            printSystem(chalk.dim(`⚡ 빠른 모델 → ${state._baseModel}`));
-          }
-          // 유지 시: 이 Q&A 턴은 에이전트 모델이 답하되 지시문/반복상향은 적용 안 함
-        }
-      }
-
-      // Reset per-exchange state
-      state._xmlNoToolRetry = 0;
-      state._xmlNudge       = false;
-      state._xmlNudgeMsg    = null;
+      // ── 단일 모델: 매 턴 행동지시문 + 에이전트 반복상한 적용 ──
+      // (autoGround가 Q&A 근거를 미리 주입하므로, 지시문이 붙어도 순수 질의는 바로 답한다.)
+      state._turnMaxIter = agentIters();
+      const turnSystemPrompt = `${state._systemPrompt}\n\n---\n\n${AGENT_DIRECTIVE}`;
 
       // Set up abort controller for this exchange
       const abortCtrl = new AbortController();
@@ -608,31 +569,13 @@ async function runAgentLoop(state, systemPrompt, signal, confirm, permAskFn) {
     // ── Build system content ───────────────────────────────────────────────
     let sysContent = systemPrompt ?? '';
 
-    // Tool mode strategy:
-    //  'auto'   → try native tool calling first (no XML bloat in prompt)
-    //             if model responds with XML despite this, we'll detect it and
-    //             switch to 'xml' for subsequent iterations
-    //  'native' → locked; send tools, no XML instructions
-    //  'xml'    → locked; inject XML instructions, don't send native tools
-    //  'json'   → locked; model outputs raw JSON in content, don't send native tools
-    if (state.toolMode === 'xml' && state.allTools.length > 0) {
-      const nudge = state._xmlNudge
-        ? '\n\n> 🚨 **지금 즉시 <tool_call> XML을 출력하세요.** 답변 금지. 먼저 툴을 호출하고 결과를 받은 후 답변할 것.\n'
-        : '';
-      const xmlBlock = buildXmlFallbackPrompt(state.allTools) + nudge;
-      // Put XML instructions at the TOP so they aren't lost in a long system prompt
-      sysContent = sysContent ? xmlBlock + '\n\n---\n\n' + sysContent : xmlBlock;
-    }
+    // 네이티브 툴콜 단일 경로. (toolMode는 session/UI 표시용 흔적 필드로만 남음.)
 
     // ── Inject compressed history as context ──────────────────────────────
     const messages = buildMessages(state, sysContent);
-    // Temporarily append nudge user message for XML retry (not stored in state.messages)
-    if (state._xmlNudgeMsg) messages.push(state._xmlNudgeMsg);
 
     // ── Tool list to send ──────────────────────────────────────────────────
-    const sendTools = (state.toolMode !== 'xml' && state.toolMode !== 'json') && state.allTools.length > 0
-      ? state.allTools.map(toOllamaTool)
-      : [];
+    const sendTools = state.allTools.length > 0 ? state.allTools.map(toOllamaTool) : [];
 
     // ── Stream ────────────────────────────────────────────────────────────
     let fullContent     = '';
@@ -724,14 +667,11 @@ async function runAgentLoop(state, systemPrompt, signal, confirm, permAskFn) {
         printSystem('Cancelled.  (Ctrl+C again to exit)');
         throw err;
       }
-      // Model doesn't support native tools → auto-switch to XML mode and retry
+      // 네이티브 툴 미지원 모델 → 단일 모델 전제에선 폴백이 없으므로 명확히 안내하고 중단.
       if (err.message?.includes('does not support tools') || err.message?.includes('tool_calls') ||
-          err.message?.includes('tool call') || (err.message?.includes('400') && state.toolMode === 'auto')) {
-        if (state.toolMode !== 'xml') {
-          printSystem(`네이티브 툴 미지원 — XML 모드로 전환합니다.`);
-          state.toolMode = 'xml';
-        }
-        continue;
+          err.message?.includes('tool call')) {
+        printError(`이 모델(${state.model})은 네이티브 툴 호출을 지원하지 않습니다. 툴을 쓰려면 qwen3:14b 등 툴 지원 모델로 전환하세요 (/model).`);
+        return;
       }
       throw err;
     }
@@ -773,88 +713,8 @@ async function runAgentLoop(state, systemPrompt, signal, confirm, permAskFn) {
       continue;
     }
 
-    // ── XML tool calls ─────────────────────────────────────────────────────
-    // Check outside think blocks first, then fall back to inside think blocks.
-    // R1-style models sometimes write tool_call inside <think> even when told not to.
-    const contentNoThink = fullContent.replace(/<think>[\s\S]*?<\/think>/g, '');
-    let xmlCalls = extractXmlToolCalls(contentNoThink);
-    if (xmlCalls.length === 0 && state.toolMode === 'xml') {
-      const thinkBlocks = [...fullContent.matchAll(/<think>([\s\S]*?)<\/think>/g)].map(m => m[1]);
-      for (const block of thinkBlocks) {
-        const inner = extractXmlToolCalls(block);
-        if (inner.length > 0) { xmlCalls = inner; break; }
-      }
-    }
-    if (xmlCalls.length > 0) {
-      if (state.toolMode === 'auto') state.toolMode = 'xml';
-
-      state.messages.push({ role: 'assistant', content: fullContent });
-
-      let toolResultBlock = '';
-      let xmlDenied = false;
-      for (const { name, params } of xmlCalls) {
-        printToolUse(name, params);
-        const result = await dispatchTool(name, params, state, confirm, permAskFn);
-        printRichResult(name, params, result);
-        if (result._denied) { xmlDenied = true; break; }
-        toolResultBlock +=
-          `<tool_result>\n<name>${name}</name>\n` +
-          `<result>${JSON.stringify(result)}</result>\n</tool_result>\n`;
-      }
-
-      state.messages.push({ role: 'user', content: toolResultBlock.trim() });
-      if (xmlDenied) return;
-      continue;
-    }
-
-    // ── JSON-in-content tool calls (e.g. Qwen outputting raw JSON) ───────────
-    const jsonCalls = extractJsonToolCalls(contentNoThink);
-    if (jsonCalls.length > 0) {
-      if (state.toolMode === 'auto') state.toolMode = 'json';
-
-      state.messages.push({ role: 'assistant', content: fullContent });
-
-      let toolResultBlock = '';
-      let jsonDenied = false;
-      for (const { name, params } of jsonCalls) {
-        printToolUse(name, params);
-        const result = await dispatchTool(name, params, state, confirm, permAskFn);
-        printRichResult(name, params, result);
-        if (result._denied) { jsonDenied = true; break; }
-        toolResultBlock +=
-          `<tool_result>\n<name>${name}</name>\n` +
-          `<result>${JSON.stringify(result)}</result>\n</tool_result>\n`;
-      }
-
-      state.messages.push({ role: 'user', content: toolResultBlock.trim() });
-      if (jsonDenied) return;
-      continue;
-    }
-
-    // ── XML mode: model responded without any tool call → retry ─────────────
-    // Only retry if the response looks like the model intended to call a tool
-    // but failed to output XML (short/incomplete), not for direct conversational answers.
-    if (state.toolMode === 'xml' && state.allTools.length > 0 && fullContent.trim()) {
-      const looksLikeDirectAnswer = fullContent.trim().length > 80 ||
-        /[.!?。]\s*$/.test(fullContent.trim());
-      const looksLikeToolIntent = /검색|찾아|조회|확인|살펴|읽어|열어|실행|let me|searching|looking|checking|reading/i.test(fullContent);
-
-      const xmlRetryKey = '_xmlNoToolRetry';
-      state[xmlRetryKey] = (state[xmlRetryKey] ?? 0) + 1;
-      if (!looksLikeDirectAnswer && looksLikeToolIntent && state[xmlRetryKey] <= 3) {
-        process.stdout.write('\n');
-        printSystem(`툴 호출 없이 답변함 — 재시도 (${state[xmlRetryKey]}/3)`);
-        state._xmlNudge = true;
-        state._xmlNudgeMsg = {
-          role: 'user',
-          content: '지금 바로 <tool_call> XML만 출력하세요. 설명·계획·코드블록 금지. 툴 호출 XML 하나만 출력할 것.',
-        };
-        continue;
-      }
-      state[xmlRetryKey] = 0;
-      state._xmlNudge    = false;
-      state._xmlNudgeMsg = null;
-    }
+    // 네이티브 툴콜이 없으면 모델이 최종 답변을 낸 것 → 종료.
+    // (qwen3는 측정상 툴콜을 100% 네이티브로 내보냄. xml/json 폴백 경로는 제거됨.)
 
     // ── Plain response — done ──────────────────────────────────────────────
     if (!headerPrinted) { printAssistantLabel(); process.stdout.write('\n'); }

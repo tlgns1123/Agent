@@ -1,20 +1,15 @@
 /**
- * OH 모델 라우터 — 턴 의도에 따라 빠른 모델(Q&A)과 에이전트 모델(툴/코딩)을 전환.
+ * OH 에이전트 상수 — 단일 모델(qwen3:14b 등 네이티브 툴콜 모델) 전제.
  *
- * 배경(2026-10-17 실측): WRN-7B는 툴콜 0/6(XML·네이티브 둘 다 무호출) = 근본 한계.
- * Qwen3-14B는 네이티브 4/6. 따라서 "툴이 필요한 작업(바이브코딩·리버싱·파일조작)"은
- * 에이전트 모델로 보내야 실제로 동작한다. 빠른 Q&A는 autoGround가 근거를 미리 주입하므로
- * 툴콜이 필요 없어 빠른 모델이 적합.
+ * 배경(2026-10-17): WRN-7B 폐기(툴콜 0/6 = 근본 한계) → qwen3:14b 단일 사용으로 전환.
+ * 측정(53턴/39툴콜, think on/off 양쪽)에서 qwen3는 툴콜을 100% 네이티브로 내보내
+ * xml/json 폴백과 모델스왑 라우터가 불필요함을 확인 → 라우터와 폴백 경로를 제거했다.
+ * 따라서 이 모듈은 더 이상 "라우팅"하지 않고, 에이전트 턴의 기본 상수만 제공한다.
  *
  * env:
- *   OH_ROUTER         on|off (기본 on)
- *   OH_MODEL_AGENT    에이전트(툴/코딩) 모델 (기본 qwen3:14b) — 미설치면 라우터 자동 비활성
- *   OH_AGENT_ITERS    에이전트 턴 최대 반복(기본 10)
+ *   OH_MODEL_AGENT   기본 모델 (기본 qwen3:14b)
+ *   OH_AGENT_ITERS   에이전트 턴 최대 반복(기본 10)
  */
-
-export function routerEnabled() {
-  return (process.env.OH_ROUTER ?? 'on').toLowerCase() !== 'off';
-}
 
 export function agentModelName() {
   return process.env.OH_MODEL_AGENT || 'qwen3:14b';
@@ -24,40 +19,10 @@ export function agentIters() {
   return Math.max(3, parseInt(process.env.OH_AGENT_ITERS ?? '10', 10) || 10);
 }
 
-// 스티키 모드: 에이전트 모델에 있을 때, 비에이전트 턴이 N회 연속돼야 빠른 모델로 되돌림.
-// 모델 스왑(VRAM 리로드)이 비싸므로 코딩세션 중 끼어든 1회성 질문에 반사적으로 안 내려가게 한다.
-export function routerSticky() {
-  return (process.env.OH_ROUTER_STICKY ?? 'on').toLowerCase() !== 'off';
-}
-export function stickyN() {
-  return Math.max(1, parseInt(process.env.OH_ROUTER_STICKY_N ?? '2', 10) || 2);
-}
-
-// 행동(툴 필요) 의도 — 작성/실행/수정/테스트/리버싱/파일조작 등.
-const ACTION_RE = new RegExp([
-  '작성', '만들', '생성', '구현', '짜줘', '짜봐', '수정', '고쳐', '고치', '리팩', '바꿔',
-  '추가해', '삭제', '제거', '옮겨', '이동해',
-  '실행', '돌려', '테스트', '빌드', '컴파일', '설치', '디버그', '커밋', '푸시', '배포',
-  '리버싱', '디스어셈', '역어셈', '언패킹', '분석해줘', '스캔', '익스플로잇', '페이로드',
-  '스크립트', 'PoC', '자동화',
-  '파일.{0,4}(만|생성|수정|읽|저장|열)',
-  'write', 'create', 'run', 'execute', 'build', 'compile', 'test', 'fix', 'refactor',
-  'implement', 'script', 'revers', 'disassembl', 'exploit', 'payload', 'debug', 'deploy',
-].join('|'), 'i');
-
-// 툴이 필요한 보안 조회(라우터가 에이전트로 보내는 편이 나은 케이스).
-const TOOL_QUERY_RE = /(패키지.{0,6}(버전|취약)|버전.{0,6}취약|dependency|gtfobins|suid.{0,6}(권한|상승)|lolbas)/i;
-
-/** 이 턴이 에이전트(툴/코딩) 모델을 필요로 하는가. */
-export function needsAgent(text) {
-  const t = (text || '').trim();
-  if (t.length < 2) return false;
-  return ACTION_RE.test(t) || TOOL_QUERY_RE.test(t);
-}
-
 /**
- * 에이전트 턴에 시스템 프롬프트에 덧붙일 "행동 지시문".
+ * 시스템 프롬프트에 덧붙이는 "행동 지시문".
  * 바이브코딩 행동(복붙 안내 금지, 직접 파일생성·실행·수정·재실행)을 강제한다.
+ * 단일 모델 전제이므로 매 턴 적용한다.
  */
 export const AGENT_DIRECTIVE = `## 에이전트 행동 규칙 (툴 우선 — 반드시 준수)
 너는 터미널에서 **직접 행동하는** 코딩/보안 에이전트다. 사용자에게 "이 코드를 복사해서 붙여넣으세요"라고 안내하지 말 것. 네가 직접 도구로 수행한다.

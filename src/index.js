@@ -157,9 +157,11 @@ import {
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-const DEFAULT_MODEL       = process.env.OH_MODEL || 'hf.co/bartowski/WhiteRabbitNeo_WhiteRabbitNeo-V3-7B-GGUF:Q4_K_M';
-// 기본 컨텍스트 길이. Phase5 실측(2026-10-17): 16384로 올려도 WRN-7B가 16GB에 6.3GB로 완전상주,
-// tok/s 손실 0(80.9 동일) → 긴 멀티파일/멀티턴 이해력 공짜 확보. env OH_NUM_CTX(기본 16384).
+// 기본 모델: qwen3:14b (2026-10-17 WRN 폐기, 단일 네이티브 툴콜 모델로 확정).
+// 16GB VRAM에 12.2GB 완전상주, 40tok/s. 바꾸려면 OH_MODEL 환경변수 또는 /model.
+const DEFAULT_MODEL       = process.env.OH_MODEL || 'qwen3:14b';
+// 기본 컨텍스트 길이. Phase5 실측(2026-10-17): 16384로 올려도 16GB VRAM 내 완전상주 가능.
+// env OH_NUM_CTX(기본 16384).
 const DEFAULT_NUM_CTX     = Math.max(2048, parseInt(process.env.OH_NUM_CTX ?? '16384', 10) || 16384);
 const DEFAULT_ITERATIONS  = 3;
 const COMPACT_KEEP_RECENT = 12;   // messages preserved verbatim after compaction

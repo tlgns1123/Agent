@@ -1,0 +1,23 @@
+{
+  "name": "oh",
+  "version": "0.1.0",
+  "description": "Ollama Helper — Claude Code style CLI for local Ollama models",
+  "type": "module",
+  "main": "src/index.js",
+  "bin": {
+    "ooh": "./src/index.js"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js"
+  },
+  "dependencies": {
+    "@huggingface/transformers": "^4.2.0",
+    "@lancedb/lancedb": "^0.30.0",
+    "better-sqlite3": "^12.11.1",
+    "chalk": "^5.4.1"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

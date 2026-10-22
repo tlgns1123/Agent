@@ -35,23 +35,24 @@
 
 ---
 
+## ✅ 추가 완료 (2026-10-22 2차)
+- [C] 샌드박스: 기본 host 유지(사용자 결정) + **`/sandbox on|off|status` 런타임 토글**(env 불필요).
+- [C] 검증 철학: self-verify **기본 off**로 격하(매턴 15~30초 지연 제거) + **`/verify` 토글**(self/exec).
+  실행 피드백을 1차 신뢰근거로. 시작/설정/help 메시지도 명령 안내로 갱신.
+- [B6] web_search: **Bing HTML 폴백 추가**(Naver→DDG→Bing). 키 불필요, DDG captcha/429 대비.
+- [D] 구조화 에러: run_command/run_code 명령없음·타임아웃 **hint** 반환. unknown-tool 유사툴 제안.
+- (환경) Windows 출력 개선: 임시 .cmd `@echo off`(에코노이즈 제거), python `PYTHONUTF8`(한글 정상),
+  spawnProcess env 지원. (cmd non-ASCII mojibake 는 배치파일 인코딩 한계로 잔존 — PowerShell 셸 전환 검토감.)
+
 ## ⏳ 남은 항목
 
-### P3
-- [C] 샌드박스 기본 ON 검토 — **정책 결정 필요**(기본 host 유지 중). WSL 가용 시 기본 ON 승격은
-  사용자 승인 후. "PC 안 망가뜨림" 제약과 일관되나 host 워크플로 깨질 수 있어 보류.
-- [C] 검증 철학: self-verify(verify.js)보다 실행 피드백(execverify.js) 격상 — directive엔 반영,
-  코드 구조 재편은 미착수. (참고: 현재 _lastGrounding 설정된 턴마다 self-verify가 돌아 지연 15~30초 추가.)
-- [B6] web_search 안정화 — DuckDuckGo 스크래핑(429/captcha 취약). **Naver API 폴백 작동 확인됨**
-  (NAVER_CLIENT_ID 설정됨)이라 체감 우선순위 낮음.
-
-### P4
-- [D] 모놀리식 분리: index.js/commands.js/tools.js — **구조 변경은 사용자 승인 후**(AGENTS.md 원칙).
-  agent.js 추출은 fix#2 근거로 완료. 나머지 분리는 churn 대비 이득 재평가 필요.
-- [정리] toolMode 흔적 필드 완전 제거(session/ui/commands 동반 수정 필요, churn).
-- [D] 구조화 에러 확대: run_command 명령없음 힌트, write_file 등 나머지 툴.
+### 보류(사유 명시 — 사용자 판단 필요)
+- [D] **모놀리식 분리**(index/commands/tools) — capability 이득 0, 대규모 churn + 리그레션 리스크.
+  AGENTS.md 원칙상 명시 동의 필요. agent.js 추출(fix#2)만 완료. **권장: 필요해질 때 파일별로 점진 분리.**
+- [정리] **toolMode 흔적 필드 제거** — session 직렬화/ui/commands 동반 수정 churn, 기능 영향 0. 보류.
+- (환경) **run_command 셸을 cmd→PowerShell 전환 검토** — 사용자가 PowerShell에서 OH 사용.
+  UTF-8 네이티브라 한글 mojibake 해결되나 명령 문법 호환성 영향 → 사용자 결정 필요.
 
 ### 품질/평가
-- e2e.js 재측정(num_ctx/모델 비교) — qwen3:14b 기준 재베이스라인. (리트리벌 베이스라인은 유지:
-  k5 Recall 94%, k10 100%, 리랭커 쿼리당 ~55초.)
 - 리랭커 ON/OFF e2e 품질 영향 측정(미결 — 리트리벌에선 이득 없었으나 무관질의 게이트선 반전).
+- (qwen3 e2e 베이스라인은 2026-10-22 측정 — project_last_session 참고.)

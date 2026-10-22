@@ -29,7 +29,7 @@ import { PluginManager }                            from './plugins.js';
 import { SessionManager }                           from './session.js';
 import { loadMcpServers }                           from './mcp.js';
 import { agentIters, AGENT_DIRECTIVE } from './router.js';
-import { runAgentTurn, toOllamaTool, parseArgs } from './agent.js';
+import { runAgentTurn, toOllamaTool } from './agent.js';
 import { logTurn, clip } from './logger.js';
 import { clearTodos } from './todo.js';
 import { isCommand, handleCommand } from './commands.js';
@@ -693,11 +693,12 @@ function flushDisplay(disp) {
   }
 }
 
-/** 최근 유저 메시지(합성 주입 제외) 본문 — 턴 로그용. */
+/** 최근 유저 메시지의 "원문"(grounding/extraContext 주입을 벗겨낸 뒤) — 턴 로그용. */
 function lastUserPrompt(state) {
   for (let i = state.messages.length - 1; i >= 0; i--) {
     const m = state.messages[i];
-    if (m.role === 'user' && !/^\[(이전 대화 요약|지식베이스 근거|웹 검색 결과|공식 CVE|MITRE ATT&CK)/.test(m.content ?? '')) {
+    if (m.role === 'user') {
+      // grounding/extraContext 는 원문 앞에 붙고 "\n\n---\n\n" 로 구분됨 → 마지막 조각이 원문.
       return (m.content ?? '').split('\n\n---\n\n').pop();
     }
   }
@@ -1179,8 +1180,10 @@ async function autoGround(state, userText) {
   const tech = (text.match(/\bT\d{4}(?:\.\d{3})?\b/i) ?? [])[0];
   if (tech) { await injectAttackLookup(state, tech.toUpperCase()); return; }
 
-  // 2c) 그 외: 명시 검색요청이거나 정보탐색 의문문일 때만 웹 폴백 (코딩·파일작업 제외)
-  if (!forced && !isInfoSeeking(text)) return;
+  // 2c) 그 외 웹 폴백은 **명시 검색요청일 때만**.
+  // (사용자 지침: 일반 질문은 검색 없이 바로 답. 자동 웹검색 금지 — feedback_search_trigger,
+  //  OH/AGENTS.md. 의문문 휴리스틱 자동검색은 오탐·불필요 비용·KB 오염을 유발하므로 제거.)
+  if (!forced) return;
 
   // 명시 트리거면 기존 파싱으로 query 정제, 아니면 전체 텍스트
   let query = text.slice(0, 200);
@@ -1193,13 +1196,6 @@ async function autoGround(state, userText) {
     }
   }
   await runWebResearch(state, query);
-}
-
-// 정보탐색 의도 휴리스틱: 의문문/사실요청인가. 코딩·파일조작 명령은 웹검색 대상에서 제외.
-function isInfoSeeking(text) {
-  if (/(작성해|만들어|구현|수정해|고쳐|리팩|실행해|설치해|커밋|디버그|이 파일|디렉터리)/.test(text)) return false;
-  if (/[?？]/.test(text)) return true;
-  return /(무엇|뭐|뭔|어떻게|어케|왜|언제|어디|누구|누가|얼마|몇|뜻|의미|차이|개념|원리|방법|정의|알려|설명|정리|조사|찾아)/.test(text);
 }
 
 // 공식 CVE 조회 결과를 주입 (tier1: NVD/MITRE + KEV/EPSS/GHSA 종합).

@@ -473,8 +473,15 @@ export async function executeTool(name, params, pluginManager = null, backupMana
     case 'lolbas_lookup':    return toolLolbasLookup(params);
     case 'dependency_lookup': return toolDependencyLookup(params);
     case 'http_request':     return toolHttpRequest(params);
-    default:
-      return { error: `Unknown tool: ${name}` };
+    default: {
+      const names = TOOL_DEFINITIONS.map((t) => t.function.name);
+      const key = String(name ?? '').toLowerCase();
+      const near = names.filter((n) => n.includes(key) || key.includes(n) || n.split('_').some((p) => key.includes(p)));
+      return {
+        error: `알 수 없는 툴: ${name}`,
+        hint: near.length ? `혹시 이것? ${near.slice(0, 4).join(', ')}` : `사용 가능한 툴: ${names.join(', ')}`,
+      };
+    }
   }
 }
 

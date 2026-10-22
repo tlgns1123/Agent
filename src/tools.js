@@ -1475,15 +1475,60 @@ async function ddgSearch(query, limit) {
   let html = await ddgFetchHtml(query, 'POST');
   if (!html) html = await ddgFetchHtml(query, 'GET');
   if (!html) html = await ddgFetchLite(query);
-  if (!html) throw new Error('검색에 실패했습니다. 네트워크를 확인하세요.');
 
-  const results = parseDdgHtml(html, limit);
-  process.stderr.write(`\r  ✓ DDG (${results.length}개)          \n`);
-  return {
-    success: true, query, source: 'duckduckgo',
-    results,
-    ...(results.length === 0 ? { note: 'No results found — try a different query.' } : {}),
-  };
+  let results = html ? parseDdgHtml(html, limit) : [];
+  if (results.length > 0) {
+    process.stderr.write(`\r  ✓ DDG (${results.length}개)          \n`);
+    return { success: true, query, source: 'duckduckgo', results };
+  }
+
+  // 3. Bing fallback — DDG 가 captcha/429/빈결과일 때(키 불필요, 상대적으로 관대).
+  const bing = await bingSearch(query, limit);
+  if (bing && bing.length > 0) {
+    process.stderr.write(`\r  ✓ Bing (${bing.length}개)          \n`);
+    return { success: true, query, source: 'bing', results: bing };
+  }
+
+  if (!html) throw new Error('검색에 실패했습니다(DDG·Bing 응답 없음). 네트워크를 확인하세요.');
+  return { success: true, query, source: 'duckduckgo', results: [], note: 'No results found — try a different query.' };
+}
+
+// ── Bing HTML 폴백 스크래퍼 ─────────────────────────────────────────────────────
+async function bingSearch(query, limit) {
+  try {
+    const res = await fetch(`https://www.bing.com/search?q=${encodeURIComponent(query)}&setlang=en&count=${Math.min(limit, 20)}`, {
+      headers: {
+        'User-Agent':      nextUA(),
+        'Accept':          'text/html,application/xhtml+xml',
+        'Accept-Language': 'en-US,en;q=0.9',
+      },
+      redirect: 'follow',
+      signal:   AbortSignal.timeout(15_000),
+    });
+    if (!res.ok) return null;
+    return parseBingHtml(await res.text(), limit);
+  } catch {
+    return null;
+  }
+}
+
+function parseBingHtml(html, limit) {
+  const results = [];
+  // 각 결과는 <li class="b_algo"> 블록. h2>a 가 제목/URL, p 가 스니펫.
+  const blocks = html.split(/<li class="b_algo"/).slice(1);
+  for (const b of blocks) {
+    if (results.length >= limit) break;
+    const linkM = b.match(/<h2>\s*<a[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/);
+    if (!linkM) continue;
+    const url = linkM[1];
+    if (!/^https?:\/\//.test(url) || /bing\.com|microsoft\.com\/.*bing/i.test(url)) continue;
+    const title = decodeEntities(stripTags(linkM[2])).trim();
+    if (!title) continue;
+    const snipM   = b.match(/<p[^>]*class="[^"]*b_lineclamp[^"]*"[^>]*>([\s\S]*?)<\/p>/) || b.match(/<p[^>]*>([\s\S]*?)<\/p>/);
+    const snippet = snipM ? decodeEntities(stripTags(snipM[1])).trim() : '';
+    results.push({ title, url, snippet });
+  }
+  return results;
 }
 
 

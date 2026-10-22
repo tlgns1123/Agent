@@ -326,6 +326,11 @@ async function main() {
     const today = new Date().toISOString().split('T')[0];
     const dateCtx = `오늘 날짜: ${today}. 검색·정보 요청 시 이 날짜 기준으로 "최신", "최근", "현재"를 판단할 것.`;
     sp = sp ? `${dateCtx}\n\n${sp}` : dateCtx;
+    // 실행 셸 고지 — run_command/run_code(shell)가 어떤 셸로 도는지 알려 올바른 문법 생성 유도.
+    const shellCtx = process.platform === 'win32'
+      ? '실행 환경: Windows. run_command/run_code(shell)는 **PowerShell**로 실행된다 → PowerShell 문법을 쓸 것(예: $env:VAR, Get-ChildItem, Select-String, Test-Path; cmd 전용 set VAR=..·%VAR% 금지). 경로는 Windows식(C:\\...). Linux 도구(nmap/grep/sqlmap 등)나 bash가 필요하면 사용자가 /sandbox on(WSL kali)으로 전환한 뒤 bash 문법을 쓴다.'
+      : '실행 환경: POSIX. run_command/run_code(shell)는 bash로 실행된다.';
+    sp = `${sp}\n\n${shellCtx}`;
     const depsCtx = await buildDepsContext(process.cwd()).catch(() => null);
     if (depsCtx) sp = sp ? `${sp}\n\n${depsCtx}` : depsCtx;
     const gitCtx = await getGitContext(process.cwd()).catch(() => null);

@@ -93,6 +93,19 @@ test('search_files: 매치 반환(ripgrep 또는 js)', async () => {
   assert.ok(['ripgrep', 'js'].includes(r.engine));
 });
 
+test('run_command: Windows 호스트 셸=PowerShell, 한글 출력 안 깨짐', { skip: process.platform !== 'win32' }, async () => {
+  const r = await executeTool('run_command', { command: 'Write-Output "한글출력테스트"' });
+  assert.ok(r.success, r.stderr);
+  assert.match(r.stdout, /한글출력테스트/);           // mojibake 면 실패
+  const v = await executeTool('run_command', { command: '$PSVersionTable.PSVersion.Major' });
+  assert.match(v.stdout.trim(), /^\d+$/);              // PowerShell 문법 실행됨
+});
+
+test('run_command: 없는 명령 → hint(복구 안내)', async () => {
+  const r = await executeTool('run_command', { command: 'nonexistent_cmd_xyz_oh' });
+  assert.ok(r.hint, 'missing-command hint 필요');
+});
+
 test('todo_write / todo_read', async () => {
   const w = await executeTool('todo_write', { todos: [
     { content: 'A', status: 'completed' },

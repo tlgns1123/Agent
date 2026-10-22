@@ -203,7 +203,7 @@ export const TOOL_DEFINITIONS = [
           language: {
             type: 'string',
             enum: ['python', 'node', 'shell'],
-            description: 'Language to execute',
+            description: 'Language to execute. "shell" = PowerShell on Windows host (bash on Linux/WSL sandbox).',
           },
           code: { type: 'string', description: 'Code to run' },
         },
@@ -215,7 +215,7 @@ export const TOOL_DEFINITIONS = [
     type: 'function',
     function: {
       name: 'run_command',
-      description: 'Run a terminal / shell command and return its output',
+      description: 'Run a shell command and return its output. Shell is PowerShell on Windows host, bash on Linux/WSL sandbox — use the matching syntax. Multi-line is supported.',
       parameters: {
         type: 'object',
         properties: {
@@ -940,12 +940,44 @@ async function runViaTempFile(ext, content, buildArgs, cwd, timeoutMs, spawnOpts
 const MISSING_INTERPRETER_RE = /ENOENT|not recognized|not found|No such file|인식되지|아닙니다|찾을 수 없/i;
 
 // 임시 .cmd 앞에 @echo off 를 붙여 명령 에코 노이즈("C:\\…>cmd")를 없앤다.
-// (참고: chcp 65001 로 UTF-8 강제는 배치파일 내 한글 리터럴을 오히려 깨뜨려 제외.
-//  한국어 Windows cmd 의 non-ASCII 출력 mojibake 는 기존 한계로 남김 — 필요 시 PowerShell
-//  셸 전환을 검토. python 출력은 PY_UTF8_ENV 로 UTF-8 고정됨.)
+// (cmd 는 PowerShell 미가용 시 폴백 경로에서만 사용. python 출력은 PY_UTF8_ENV 로 UTF-8 고정.)
 function wrapCmdContent(content) {
   return `@echo off\r\n${content}`;
 }
+
+// 호스트 셸: Windows 에서는 PowerShell 로 실행한다(사용자 결정 2026-10-22).
+// 이유: 한국어 Windows cmd 의 CP949 출력 mojibake 해결, OH 파일툴과 같은 Windows 경로(C:\),
+// 사용자 실제 셸과 일치. Linux/bash 작업은 /sandbox on(WSL) 경로가 담당.
+let _pwshBin;   // undefined=미탐지, string=바이너리명, null=없음(→cmd 폴백)
+async function resolvePwsh() {
+  if (_pwshBin !== undefined) return _pwshBin;
+  // pwsh(PS7, UTF-8 기본) 우선, 없으면 powershell.exe(5.1, 항상 존재).
+  const candidates = process.platform === 'win32' ? ['pwsh.exe', 'powershell.exe'] : ['pwsh'];
+  for (const c of candidates) {
+    const ok = await new Promise((res) => {
+      try {
+        const p = spawn(c, ['-NoProfile', '-NonInteractive', '-Command', 'exit 0'], { windowsHide: true });
+        p.on('error', () => res(false));
+        p.on('close', (code) => res(code === 0));
+      } catch { res(false); }
+    });
+    if (ok) { _pwshBin = c; return _pwshBin; }
+  }
+  _pwshBin = null;
+  return _pwshBin;
+}
+
+// 임시 .ps1 내용 래퍼: UTF-8 BOM(PS 5.1 이 스크립트를 UTF-8 로 읽어 한글 리터럴 보존)
+// + 콘솔 출력 인코딩을 UTF-8 로 고정(Node 가 utf8 로 디코딩 → mojibake 없음).
+function wrapPwshContent(content) {
+  return '\uFEFF' +
+    '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8\r\n' +
+    '$OutputEncoding = [System.Text.Encoding]::UTF8\r\n' +
+    '$ErrorActionPreference = "Continue"\r\n' +
+    content;
+}
+
+const PWSH_ARGS = (f) => ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', f];
 
 // python 출력도 UTF-8 로 강제(한글 print 깨짐 방지).
 const PY_UTF8_ENV = { PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8' };
@@ -961,9 +993,10 @@ function clampOutput(s, max) {
 function runHint({ code, stderr }) {
   const e = stderr || '';
   if (/\[Killed: timeout\]/.test(e)) return '시간 초과. timeout 인자를 늘리거나(ms), 작업을 더 작게 나눠 실행하라.';
-  // 셸이 내부 명령을 못 찾으면 exit 1(Windows) 또는 127(POSIX), spawn 실패면 -1.
-  if (code !== 0 && MISSING_INTERPRETER_RE.test(e)) {
-    return '명령/인터프리터를 찾지 못함. 설치 여부를 확인하거나(where/which), 대안 도구를 쓰라. 보안툴이 호스트에 없으면 /sandbox on 으로 WSL(kali)에서 실행.';
+  // 명령 없음: PowerShell 은 non-terminating(exit 0)이라 코드 대신 stderr 패턴으로 판정.
+  // 패턴(not recognized/인식되지/ENOENT 등)이 특정적이라 성공 명령의 오탐 위험은 낮다.
+  if (MISSING_INTERPRETER_RE.test(e)) {
+    return '명령/인터프리터를 찾지 못함. 설치 여부를 확인하거나(Get-Command/where), 대안 도구를 쓰라. 보안툴이 호스트에 없으면 /sandbox on 으로 WSL(kali)에서 실행.';
   }
   return null;
 }
@@ -985,7 +1018,12 @@ async function toolRunCode({ language, code }, opts = {}) {
     result = await runViaTempFile('cjs', code, (f) => ({ cmd: 'node', args: [f] }), null, 30_000, { onOutput });
   } else if (language === 'shell') {
     if (process.platform === 'win32') {
-      result = await runViaTempFile('cmd', wrapCmdContent(code), (f) => ({ cmd: 'cmd', args: ['/c', f] }), null, 30_000, { onOutput });
+      const pwsh = await resolvePwsh();
+      if (pwsh) {
+        result = await runViaTempFile('ps1', wrapPwshContent(code), (f) => ({ cmd: pwsh, args: PWSH_ARGS(f) }), null, 30_000, { onOutput });
+      } else {
+        result = await runViaTempFile('cmd', wrapCmdContent(code), (f) => ({ cmd: 'cmd', args: ['/c', f] }), null, 30_000, { onOutput });
+      }
     } else {
       result = await runViaTempFile('sh', code, (f) => ({ cmd: 'bash', args: [f] }), null, 30_000, { onOutput });
     }
@@ -1014,7 +1052,12 @@ async function toolRunCommand({ command, cwd, timeout }, opts = {}) {
   if (sb) {
     result = await spawnProcess(sb.cmd, sb.args, null, timeoutMs, { shell: sb.useShell, onOutput });
   } else if (process.platform === 'win32') {
-    result = await runViaTempFile('cmd', wrapCmdContent(command), (f) => ({ cmd: 'cmd', args: ['/c', f] }), cwd, timeoutMs, { onOutput });
+    const pwsh = await resolvePwsh();
+    if (pwsh) {
+      result = await runViaTempFile('ps1', wrapPwshContent(command), (f) => ({ cmd: pwsh, args: PWSH_ARGS(f) }), cwd, timeoutMs, { onOutput });
+    } else {
+      result = await runViaTempFile('cmd', wrapCmdContent(command), (f) => ({ cmd: 'cmd', args: ['/c', f] }), cwd, timeoutMs, { onOutput });
+    }
   } else {
     result = await runViaTempFile('sh', command, (f) => ({ cmd: 'bash', args: [f] }), cwd, timeoutMs, { onOutput });
   }

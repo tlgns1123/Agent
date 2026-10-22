@@ -2,9 +2,11 @@
 // 측정: 한글비율 · 핵심어 커버리지 · 지연(ms) · tok/s. num_ctx/모델 비교에 사용.
 import { searchHybrid, stats } from '../src/rag.js';
 import { streamChat } from '../src/ollama.js';
+import { agentModelName } from '../src/router.js';
 import { loadDataset, hangulRatio, keywordCoverage, isDegenerate, mean, fmt, pct, printTable } from './lib.js';
 
-const MODEL   = process.env.OH_MODEL || 'hf.co/bartowski/WhiteRabbitNeo_WhiteRabbitNeo-V3-7B-GGUF:Q4_K_M';
+// 기본 모델은 프로덕션과 동일(qwen3:14b). WRN 폐기 반영(2026-10-17).
+const MODEL   = process.env.OH_MODEL || agentModelName();
 const NUM_CTX = parseInt(process.env.OH_EVAL_NUMCTX || '16384', 10);
 const TOPK    = parseInt(process.env.OH_EVAL_TOPK || '5', 10);
 const NUM_PRED = parseInt(process.env.OH_NUM_PREDICT || '4096', 10);   // 폭주 방지(프로덕션과 동일)

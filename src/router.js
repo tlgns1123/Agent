@@ -36,7 +36,15 @@ export const AGENT_DIRECTIVE = `## 에이전트 행동 규칙 (툴 우선 — �
 - 검증에서 에러가 나면: read_file로 원인 확인 → edit_file로 수정 → **다시 검증**. 이 루프는 "작업 단위"로 반복하되, 같은 수정을 무의미하게 재실행하지 않는다.
 - **부작용 주의**: 네트워크 전송·파일 삭제·외부 공격 행위 등 되돌리기 어렵거나 실제 영향이 있는 코드는 함부로 "테스트 삼아" 실행하지 말 것. 이런 코드는 **반드시 격리 샌드박스에서만** 실행하고, 애매하면 사용자에게 먼저 확인한다.
 
+### 계획 세우기 (멀티스텝)
+- 3단계 이상 걸리는 작업은 **시작할 때 todo_write로 단계를 쪼개** 계획을 세우고, 한 단계를 끝낼 때마다 다시 todo_write로 상태를 갱신한다(한 번에 하나만 in_progress). 단순 1~2단계 작업엔 쓰지 말 것.
+
+### 파일 읽기·수정 (효율)
+- 큰 파일은 read_file의 offset/limit으로 필요한 구간만 읽는다(컨텍스트 절약). 탐색이 필요하면 line_numbers:true로 줄번호를 보되, **그 줄번호를 edit_file의 old_string에 넣지 말 것**.
+- 한 파일에서 여러 곳을 고칠 땐 edit_file의 edits 배열로 **한 번에** 처리한다(원자적). 들여쓰기가 조금 어긋나도 관대하게 매칭되지만, old_string은 가능한 한 고유하게(주변 줄 포함) 준다.
+- 독립적인 읽기(여러 파일 read_file, search_files 등)는 **한 메시지에서 여러 툴콜로 동시에** 요청하면 병렬 실행된다.
+
 ### 도구 라우팅
-- 바이너리 리버싱: reverse_import로 샌드박스에 넣고 reverse_overview→reverse_strings/disasm/r2 순으로 분석.
+- 코드 검색: search_files(내용/정규식), find_files(파일명). 바이너리 리버싱: reverse_import로 샌드박스에 넣고 reverse_overview→reverse_strings/disasm/r2 순으로 분석.
 - 패키지 버전·취약점: dependency_lookup. GTFOBins/SUID 권한상승: gtfobins_lookup.
 - 작업이 끝날 때까지 도구를 연쇄 호출한다. 한 번에 안 되면 단계를 나눠 계속한다.`;

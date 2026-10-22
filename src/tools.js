@@ -891,6 +891,7 @@ function spawnProcess(cmd, args, cwd, timeoutMs = 30_000, opts = {}) {
       cwd: cwd || process.cwd(),
       shell: useShell,
       windowsHide: true,
+      env: opts.env ? { ...process.env, ...opts.env } : process.env,
     });
 
     let stdout = '';
@@ -936,13 +937,35 @@ async function runViaTempFile(ext, content, buildArgs, cwd, timeoutMs, spawnOpts
   }
 }
 
-const MISSING_INTERPRETER_RE = /ENOENT|not recognized|not found|No such file/i;
+const MISSING_INTERPRETER_RE = /ENOENT|not recognized|not found|No such file|인식되지|아닙니다|찾을 수 없/i;
+
+// 임시 .cmd 앞에 @echo off 를 붙여 명령 에코 노이즈("C:\\…>cmd")를 없앤다.
+// (참고: chcp 65001 로 UTF-8 강제는 배치파일 내 한글 리터럴을 오히려 깨뜨려 제외.
+//  한국어 Windows cmd 의 non-ASCII 출력 mojibake 는 기존 한계로 남김 — 필요 시 PowerShell
+//  셸 전환을 검토. python 출력은 PY_UTF8_ENV 로 UTF-8 고정됨.)
+function wrapCmdContent(content) {
+  return `@echo off\r\n${content}`;
+}
+
+// python 출력도 UTF-8 로 강제(한글 print 깨짐 방지).
+const PY_UTF8_ENV = { PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8' };
 
 // stdout/stderr 를 잘라내되 넘치면 명시적 잘림 신호를 붙인다(모델이 전체로 오인 방지).
 function clampOutput(s, max) {
   const str = s ?? '';
   if (str.length <= max) return str;
   return str.slice(0, max) + `\n…[출력 ${str.length - max}자 잘림 — 전체가 필요하면 더 좁은 명령으로 다시 실행]`;
+}
+
+// 실행 결과에서 "명령/인터프리터 없음"·타임아웃을 감지해 복구 힌트를 만든다.
+function runHint({ code, stderr }) {
+  const e = stderr || '';
+  if (/\[Killed: timeout\]/.test(e)) return '시간 초과. timeout 인자를 늘리거나(ms), 작업을 더 작게 나눠 실행하라.';
+  // 셸이 내부 명령을 못 찾으면 exit 1(Windows) 또는 127(POSIX), spawn 실패면 -1.
+  if (code !== 0 && MISSING_INTERPRETER_RE.test(e)) {
+    return '명령/인터프리터를 찾지 못함. 설치 여부를 확인하거나(where/which), 대안 도구를 쓰라. 보안툴이 호스트에 없으면 /sandbox on 으로 WSL(kali)에서 실행.';
+  }
+  return null;
 }
 
 async function toolRunCode({ language, code }, opts = {}) {
@@ -954,15 +977,15 @@ async function toolRunCode({ language, code }, opts = {}) {
   if (sb) {
     result = await spawnProcess(sb.cmd, sb.args, null, 30_000, { shell: sb.useShell, onOutput });
   } else if (language === 'python') {
-    result = await runViaTempFile('py', code, (f) => ({ cmd: 'python', args: [f] }), null, 30_000, { onOutput });
+    result = await runViaTempFile('py', code, (f) => ({ cmd: 'python', args: [f] }), null, 30_000, { onOutput, env: PY_UTF8_ENV });
     if (result.code === -1 && MISSING_INTERPRETER_RE.test(result.stderr)) {
-      result = await runViaTempFile('py', code, (f) => ({ cmd: 'python3', args: [f] }), null, 30_000, { onOutput });
+      result = await runViaTempFile('py', code, (f) => ({ cmd: 'python3', args: [f] }), null, 30_000, { onOutput, env: PY_UTF8_ENV });
     }
   } else if (language === 'node') {
     result = await runViaTempFile('cjs', code, (f) => ({ cmd: 'node', args: [f] }), null, 30_000, { onOutput });
   } else if (language === 'shell') {
     if (process.platform === 'win32') {
-      result = await runViaTempFile('cmd', code, (f) => ({ cmd: 'cmd', args: ['/c', f] }), null, 30_000, { onOutput });
+      result = await runViaTempFile('cmd', wrapCmdContent(code), (f) => ({ cmd: 'cmd', args: ['/c', f] }), null, 30_000, { onOutput });
     } else {
       result = await runViaTempFile('sh', code, (f) => ({ cmd: 'bash', args: [f] }), null, 30_000, { onOutput });
     }
@@ -970,12 +993,14 @@ async function toolRunCode({ language, code }, opts = {}) {
     return { error: `Unsupported language: ${language}` };
   }
 
+  const hint = runHint(result);
   return {
     success: result.code === 0,
     exit_code: result.code,
     stdout: clampOutput(result.stdout, 10_000),
     stderr: clampOutput(result.stderr, 5_000),
     sandbox: sandboxLabel(),
+    ...(hint ? { hint } : {}),
   };
 }
 
@@ -989,16 +1014,18 @@ async function toolRunCommand({ command, cwd, timeout }, opts = {}) {
   if (sb) {
     result = await spawnProcess(sb.cmd, sb.args, null, timeoutMs, { shell: sb.useShell, onOutput });
   } else if (process.platform === 'win32') {
-    result = await runViaTempFile('cmd', command, (f) => ({ cmd: 'cmd', args: ['/c', f] }), cwd, timeoutMs, { onOutput });
+    result = await runViaTempFile('cmd', wrapCmdContent(command), (f) => ({ cmd: 'cmd', args: ['/c', f] }), cwd, timeoutMs, { onOutput });
   } else {
     result = await runViaTempFile('sh', command, (f) => ({ cmd: 'bash', args: [f] }), cwd, timeoutMs, { onOutput });
   }
+  const hint = runHint(result);
   return {
     success: result.code === 0,
     exit_code: result.code,
     stdout: clampOutput(result.stdout, 10_000),
     stderr: clampOutput(result.stderr, 5_000),
     sandbox: sandboxLabel(),
+    ...(hint ? { hint } : {}),
   };
 }
 

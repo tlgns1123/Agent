@@ -160,11 +160,10 @@ import {
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-// 기본 모델: huihui_ai/qwen3-abliterated:14b (2026-10-22 무검열 전환).
-// qwen3:14b 의 abliterated(무필터) 버전 — 같은 아키텍처라 네이티브 툴콜 유지(CTF 6/6 실측),
-// Q4_K_M 9.0GB로 16GB VRAM 상주. stock qwen3가 거부하는 요청도 수행(허가된 레드팀/연구 전제).
-// stock 으로 복귀: OH_MODEL=qwen3:14b 또는 /model.
-const DEFAULT_MODEL       = process.env.OH_MODEL || 'huihui_ai/qwen3-abliterated:14b';
+// 기본 모델: qwen3:14b (stock). 2026-10-23 abliterated에서 복귀 — abliteration이
+// 추론·일관성·신뢰성을 손상시켜 품질 저하 체감(사용자 과거 30b 폐기 이력과 동일).
+// 무필터가 꼭 필요한 작업만 OH_MODEL=huihui_ai/qwen3-abliterated:14b 또는 /model로 전환.
+const DEFAULT_MODEL       = process.env.OH_MODEL || 'qwen3:14b';
 // 기본 컨텍스트 길이. Phase5 실측(2026-10-17): 16384로 올려도 16GB VRAM 내 완전상주 가능.
 // env OH_NUM_CTX(기본 16384).
 const DEFAULT_NUM_CTX     = Math.max(2048, parseInt(process.env.OH_NUM_CTX ?? '16384', 10) || 16384);

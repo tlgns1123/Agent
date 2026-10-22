@@ -19,7 +19,7 @@ import {
   buildAgentsUpdatePrompt,
 } from './init.js';
 import { streamChat, pullModel, deleteModel } from './ollama.js';
-import { sandboxLabel } from './sandbox.js';
+import { sandboxLabel, sandboxEnabled, sandboxDistro, checkSandbox } from './sandbox.js';
 import {
   isGitRepo, getGitDiff, gitStatus, gitListBranches,
   gitCheckout, gitAdd, gitCommit, gitPush,
@@ -67,6 +67,8 @@ export async function handleCommand(input, state) {
     case '/lint':     await cmdLint(args, state);       return { handled: true };
     case '/undo':     await cmdUndo(args, state);        return { handled: true };
     case '/watch':    await cmdWatch(args, state);      return { handled: true };
+    case '/sandbox':  cmdSandbox(args, state);          return { handled: true };
+    case '/verify':   cmdVerify(args, state);           return { handled: true };
     case '/rag':      await cmdRag(input, state);        return { handled: true };
     case '/exit':
     case '/quit':
@@ -226,6 +228,14 @@ ${h('/rag remove <ID>', '문서 삭제 / /rag clear 전체삭제 / /rag reindex 
 ${c('  파일 감시 / 자동 리뷰')}
 ${h('/watch', '파일 변경 감시 시작 (변경 시 알림)')}
 ${h('/watch stop', '파일 감시 중지')}
+
+${c('  실행 격리 / 검증')}
+${h('/sandbox', '격리 상태 보기 (기본: host 직접 실행)')}
+${h('/sandbox on [배포판]', '위험한 실행을 WSL 안에서 (기본: kali-linux)')}
+${h('/sandbox off', 'host 직접 실행으로 복귀')}
+${h('/verify', '답변 2차 검증 상태 (기본 off)')}
+${h('/verify on|off', '자기검증(self-critique) 토글')}
+${h('/verify exec on|off', '답변 코드 샌드박스 실행검증 토글')}
 
 ${c('  코드 품질')}
 ${h('/todo', 'TODO / FIXME / HACK 주석 목록')}
@@ -396,6 +406,60 @@ async function cmdMemory(args, state) {
 
 // ─── /tools ───────────────────────────────────────────────────────────────────
 
+// ─── /verify ──────────────────────────────────────────────────────────────────
+// 답변 후 2차 검증 토글. 둘 다 기본 off(지연·opt-in).
+//   self = 자기비판(verify.js), exec = 답변 코드를 샌드박스에서 실제 실행(execverify.js)
+// 신뢰 우선순위: 실행 피드백 > 자기비판. exec 는 /sandbox on 과 함께 쓰는 것을 권장.
+function cmdVerify(args, state) {
+  const on = (v) => (v ?? 'off').toLowerCase() === 'on';
+  const sub = (args[0] || 'status').toLowerCase();
+  const val = (args[1] || '').toLowerCase();
+
+  if (sub === 'on' || sub === 'off') { process.env.OH_VERIFY = sub; printSystem(`자기검증(self): ${sub === 'on' ? chalk.green('ON') : chalk.dim('OFF')}`); return; }
+  if (sub === 'exec') {
+    if (val === 'on' || val === 'off') { process.env.OH_EXEC_VERIFY = val; printSystem(`실행검증(exec): ${val === 'on' ? chalk.green('ON') : chalk.dim('OFF')}${val === 'on' && !sandboxEnabled() ? chalk.yellow('  — /sandbox on 권장(코드 실제 실행)') : ''}`); return; }
+    printSystem('사용법: /verify exec on|off');
+    return;
+  }
+  // status
+  printSystem(`검증 — 자기검증(self): ${on(process.env.OH_VERIFY) ? chalk.green('ON') : chalk.dim('OFF')}  ·  실행검증(exec): ${on(process.env.OH_EXEC_VERIFY) ? chalk.green('ON') : chalk.dim('OFF')}  ${chalk.dim('(/verify on|off, /verify exec on|off)')}`);
+}
+
+// ─── /sandbox ─────────────────────────────────────────────────────────────────
+// 실행 격리를 런타임에 토글(기본 host). 보안도구지만 PC 안 망가뜨림 원칙상 기본은
+// 무격리 host, 위험한 실행이 필요할 때 사용자가 /sandbox on 으로 켠다.
+function cmdSandbox(args, state) {
+  const sub = (args[0] || 'status').toLowerCase();
+
+  if (sub === 'on') {
+    if (args[1]) process.env.OH_SANDBOX_DISTRO = args[1];
+    process.env.OH_SANDBOX = 'wsl';
+    const chk = checkSandbox();
+    if (chk.ok) {
+      printSystem(`🔒 실행 격리 ON — run_command/run_code 는 '${chk.distro}'(WSL) 안에서 실행됩니다. 윈도우 파일·실행 차단.`);
+    } else {
+      process.env.OH_SANDBOX = 'host';
+      printError(`샌드박스 '${chk.distro}' 사용 불가: ${chk.error}`);
+      printSystem('→ host(격리 off) 유지. 배포판 확인: wsl -l -v  ·  다른 배포판: /sandbox on <이름>');
+    }
+    return;
+  }
+
+  if (sub === 'off') {
+    process.env.OH_SANDBOX = 'host';
+    printSystem('실행 격리 OFF — 명령/코드는 호스트에서 직접 실행됩니다.');
+    return;
+  }
+
+  // status (기본)
+  if (sandboxEnabled()) {
+    const chk = checkSandbox();
+    printSystem(`실행 격리: ${chalk.green('ON')} (${sandboxLabel()})${chk.ok ? chalk.dim(' · 동작 확인됨') : chalk.red(' · 사용불가: ' + chk.error)}`);
+  } else {
+    printSystem(`실행 격리: ${chalk.dim('OFF (host 직접 실행)')}. 켜려면 ${chalk.cyan('/sandbox on')} [배포판]  ${chalk.dim(`(기본: ${sandboxDistro()})`)}`);
+  }
+}
+
 function cmdTools(state) {
   const tools = state.allTools;
   const ICONS = {
@@ -484,7 +548,7 @@ async function cmdConfig(args, state) {
     const vMode = (process.env.OH_VERIFY_MODE ?? 'flag').toLowerCase() === 'correct' ? 'correct' : 'flag';
     console.log(`  ${chalk.dim('self-verify'.padEnd(16))}${vOn ? chalk.green(vMode) : chalk.dim('off')}  ${chalk.dim('(자기검증 2차패스, env OH_VERIFY / OH_VERIFY_MODE)')}`);
     const sbOn = (process.env.OH_SANDBOX ?? 'host').toLowerCase() === 'wsl';
-    console.log(`  ${chalk.dim('sandbox'.padEnd(16))}${sbOn ? chalk.green(sandboxLabel()) : chalk.dim('host (격리 off)')}  ${chalk.dim('(실행 격리, env OH_SANDBOX=wsl / OH_SANDBOX_DISTRO)')}`);
+    console.log(`  ${chalk.dim('sandbox'.padEnd(16))}${sbOn ? chalk.green(sandboxLabel()) : chalk.dim('host (격리 off)')}  ${chalk.dim('(실행 격리 — /sandbox on 으로 토글)')}`);
     const exOn = (process.env.OH_EXEC_VERIFY ?? 'off').toLowerCase() === 'on';
     console.log(`  ${chalk.dim('exec-verify'.padEnd(16))}${exOn ? (sbOn ? chalk.green('on') : chalk.yellow('on (격리 필요)')) : chalk.dim('off')}  ${chalk.dim('(답변 코드 격리실행 검증, env OH_EXEC_VERIFY=on + OH_SANDBOX=wsl)')}`);
     const mqOn = (process.env.OH_MULTIQUERY ?? 'on').toLowerCase() !== 'off';

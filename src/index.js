@@ -312,7 +312,7 @@ async function main() {
       process.env.OH_SANDBOX = 'host';
     }
   } else {
-    printSystem(chalk.dim('실행 격리 OFF — 명령/코드는 호스트에서 직접 실행됩니다. 격리하려면 OH_SANDBOX=wsl'));
+    printSystem(chalk.dim('실행 격리 OFF — 명령/코드는 호스트에서 직접 실행됩니다. 위험한 실행은 /sandbox on 으로 WSL 격리.'));
   }
 
   // ── 모델 설정을 AGENTS.md에 기록 (변경됐거나 블록 없을 때) ────────────────
@@ -511,8 +511,11 @@ async function main() {
       try {
         await runAgentLoop(state, turnSystemPrompt, abortCtrl.signal, confirm, permAskFn);
 
-        // ── 자기검증 2차 패스 (근거 주입된 턴만) ──────────────────────────
-        if (!abortCtrl.signal.aborted && state._lastGrounding) {
+        // ── 자기검증 2차 패스 (근거 주입된 턴만, opt-in) ──────────────────
+        // 기본 off: 매 턴 자기비판은 지연이 크고(15~30초) 14B 자기비판 천장이 낮다.
+        // 실행 피드백(인라인 도구 사용 + 아래 실행검증)을 1차 신뢰근거로 격상.
+        // 켜려면 /verify on 또는 OH_VERIFY=on.
+        if (!abortCtrl.signal.aborted && state._lastGrounding && verifyEnabled()) {
           const lastAssistant = [...state.messages].reverse().find(m => m.role === 'assistant');
           if (lastAssistant?.content) {
             const stopSpin = startSpinner('자기검증 중…');
@@ -564,6 +567,11 @@ async function main() {
 }
 
 // ─── Agent loop ───────────────────────────────────────────────────────────────
+
+// 자기검증(verify.js) 활성 여부 — 기본 off. /verify on 또는 OH_VERIFY=on 으로 켬.
+function verifyEnabled() {
+  return (process.env.OH_VERIFY ?? 'off').toLowerCase() === 'on';
+}
 
 async function runAgentLoop(state, systemPrompt, signal, confirm, permAskFn) {
   clearTodos();   // 매 유저 턴마다 계획 초기화

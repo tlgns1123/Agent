@@ -41,8 +41,9 @@
   실행 피드백을 1차 신뢰근거로. 시작/설정/help 메시지도 명령 안내로 갱신.
 - [B6] web_search: **Bing HTML 폴백 추가**(Naver→DDG→Bing). 키 불필요, DDG captcha/429 대비.
 - [D] 구조화 에러: run_command/run_code 명령없음·타임아웃 **hint** 반환. unknown-tool 유사툴 제안.
-- (환경) Windows 출력 개선: 임시 .cmd `@echo off`(에코노이즈 제거), python `PYTHONUTF8`(한글 정상),
-  spawnProcess env 지원. (cmd non-ASCII mojibake 는 배치파일 인코딩 한계로 잔존 — PowerShell 셸 전환 검토감.)
+- (환경) **호스트 셸 cmd→PowerShell 전환**(사용자 결정): resolvePwsh(pwsh→powershell.exe→cmd폴백),
+  UTF-8 BOM+OutputEncoding 으로 한글 mojibake 완전 해결, 경로 C:\ 일관, 사용자 실제 셸과 일치.
+  Linux/bash 는 /sandbox on(WSL) 담당. 시스템프롬프트/툴설명에 "호스트=PowerShell" 고지. python PYTHONUTF8 유지.
 
 ## ⏳ 남은 항목
 
@@ -50,8 +51,6 @@
 - [D] **모놀리식 분리**(index/commands/tools) — capability 이득 0, 대규모 churn + 리그레션 리스크.
   AGENTS.md 원칙상 명시 동의 필요. agent.js 추출(fix#2)만 완료. **권장: 필요해질 때 파일별로 점진 분리.**
 - [정리] **toolMode 흔적 필드 제거** — session 직렬화/ui/commands 동반 수정 churn, 기능 영향 0. 보류.
-- (환경) **run_command 셸을 cmd→PowerShell 전환 검토** — 사용자가 PowerShell에서 OH 사용.
-  UTF-8 네이티브라 한글 mojibake 해결되나 명령 문법 호환성 영향 → 사용자 결정 필요.
 
 ### 품질/평가
 - 리랭커 ON/OFF e2e 품질 영향 측정(미결 — 리트리벌에선 이득 없었으나 무관질의 게이트선 반전).

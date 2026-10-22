@@ -49,7 +49,7 @@
 
 <!-- ooh:model-config -->
 ## 모델 설정
-- model: dengcao/Qwen3-Embedding-0.6B:Q8_0
+- model: huihui_ai/qwen3-abliterated:14b
 - context: default
 - temperature: 0.8
 - top_p: 0.9

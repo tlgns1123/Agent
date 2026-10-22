@@ -12,7 +12,7 @@
  */
 
 export function agentModelName() {
-  return process.env.OH_MODEL_AGENT || 'qwen3:14b';
+  return process.env.OH_MODEL_AGENT || 'huihui_ai/qwen3-abliterated:14b';
 }
 
 export function agentIters() {

@@ -16,7 +16,9 @@
  * 재해석을 피해 임의 명령/코드를 안전하게 넘긴다.
  */
 
-import { spawnSync } from 'child_process';
+import { spawnSync, spawn } from 'child_process';
+import { readFile } from 'fs/promises';
+import { basename } from 'path';
 
 export function sandboxMode() {
   return (process.env.OH_SANDBOX ?? 'host').toLowerCase() === 'wsl' ? 'wsl' : 'host';
@@ -60,6 +62,40 @@ export function wrapCode(language, code) {
   if (language === 'node')   return { cmd: 'wsl', args: [...base, 'node', '-e', code], useShell: false };
   if (language === 'shell')  return { cmd: 'wsl', args: [...base, 'bash', '-c', code], useShell: false };
   return null; // 미지원 언어 → 호출자가 처리
+}
+
+/** 샌드박스 내 스테이징 디렉터리(호스트에서 들여온 분석 대상 파일 보관처). */
+export function stageDir() { return '/tmp/oh_stage'; }
+
+/**
+ * 호스트(윈도우) 파일을 샌드박스 안으로 복사한다 — C: 미마운트(automount off) 환경에서도
+ * 동작하도록 /mnt 의존 없이 stdin 파이프로 바이트를 밀어넣는다. 격리를 유지한 채
+ * 바이너리 리버싱/악성샘플 분석 대상을 샌드박스로 반입하는 표준 경로.
+ * 반환: Promise<{ ok, sandbox_path?, size_bytes?, sandbox?, error? }>
+ */
+export async function stageIntoSandbox(hostPath, timeoutMs = 120_000) {
+  if (!sandboxEnabled()) return { ok: false, error: 'sandbox-off' };
+  let buf;
+  try { buf = await readFile(hostPath); }
+  catch (e) { return { ok: false, error: `호스트 파일 읽기 실패: ${e.message}` }; }
+  const base = (basename(hostPath).replace(/[^\w.\-]/g, '_')) || 'staged.bin';
+  const dest = `${stageDir()}/${base}`;
+  const inner = `mkdir -p ${shq(stageDir())} && cat > ${shq(dest)} && chmod +x ${shq(dest)} 2>/dev/null; wc -c < ${shq(dest)}`;
+  return await new Promise((resolveP) => {
+    const proc = spawn('wsl', [...baseArgs(), 'bash', '-lc', inner], { windowsHide: true, shell: false });
+    let out = '', err = '';
+    proc.stdout.on('data', (d) => { out += d.toString(); });
+    proc.stderr.on('data', (d) => { err += d.toString(); });
+    const timer = setTimeout(() => { proc.kill(); resolveP({ ok: false, error: 'timeout' }); }, timeoutMs);
+    proc.on('error', (e) => { clearTimeout(timer); resolveP({ ok: false, error: e.message }); });
+    proc.on('close', (code) => {
+      clearTimeout(timer);
+      if (code === 0) resolveP({ ok: true, sandbox_path: dest, size_bytes: parseInt(out.trim(), 10) || buf.length, sandbox: sandboxLabel() });
+      else resolveP({ ok: false, error: err.trim() || `exit ${code}` });
+    });
+    proc.stdin.write(buf);
+    proc.stdin.end();
+  });
 }
 
 /**

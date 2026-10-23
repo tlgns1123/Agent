@@ -49,6 +49,15 @@ export async function buildDepsContext(workDir) {
 
 // ─── Node.js ──────────────────────────────────────────────────────────────────
 
+// node_modules 에서 실제 설치된 버전을 읽는다(매니페스트 범위가 아니라 "설치본").
+async function installedNodeVersion(workDir, name) {
+  try {
+    const pj = join(workDir, 'node_modules', name, 'package.json');
+    if (!existsSync(pj)) return null;
+    return JSON.parse(await readFile(pj, 'utf-8')).version || null;
+  } catch { return null; }
+}
+
 async function readNodeDeps(workDir) {
   const p = join(workDir, 'package.json');
   if (!existsSync(p)) return null;
@@ -59,20 +68,35 @@ async function readNodeDeps(workDir) {
     const vers = pkg.version ?? '';
     const lines = [`**Node.js** — ${name}${vers ? ` v${vers}` : ''}`];
 
+    const lockfile  = ['package-lock.json', 'pnpm-lock.yaml', 'yarn.lock', 'bun.lockb'].find((f) => existsSync(join(workDir, f)));
+    const hasModules = existsSync(join(workDir, 'node_modules'));
+
+    // 스펙(범위)과 실제 설치 버전을 함께 표기 → 모델이 설치본 API에 맞춰 코딩하도록.
+    const fmt = async (entries, limit) => {
+      const out = [];
+      for (const [dn, spec] of entries.slice(0, limit)) {
+        const inst = await installedNodeVersion(workDir, dn);
+        out.push(`  ${dn}: ${spec}${inst ? ` → 설치 ${inst}` : (hasModules ? ' → 미설치' : '')}`);
+      }
+      if (entries.length > limit) out.push(`  … 외 ${entries.length - limit}개`);
+      return out;
+    };
+
     const deps    = Object.entries(pkg.dependencies    ?? {});
     const devDeps = Object.entries(pkg.devDependencies ?? {});
 
     if (deps.length) {
-      lines.push('Dependencies:');
-      lines.push(...formatDeps(deps, 30));
+      lines.push('Dependencies (스펙 → 실제 설치):');
+      lines.push(...await fmt(deps, 30));
     }
     if (devDeps.length) {
       lines.push('Dev dependencies:');
-      lines.push(...formatDeps(devDeps, 20));
+      lines.push(...await fmt(devDeps, 20));
     }
 
     const scripts = Object.keys(pkg.scripts ?? {});
     if (scripts.length) lines.push(`Scripts: ${scripts.join(', ')}`);
+    lines.push(lockfile ? `Lockfile: ${lockfile}` : (hasModules ? 'Lockfile: 없음(node_modules만 존재)' : '⚠️ 아직 설치 안 됨 — npm install 필요'));
 
     return lines.join('\n');
   } catch {
@@ -81,6 +105,14 @@ async function readNodeDeps(workDir) {
 }
 
 // ─── Python ───────────────────────────────────────────────────────────────────
+
+// 프로젝트 내 가상환경 감지 → 설치버전 확인 경로 안내(전역/conda는 빌드타임 실측 불안정).
+function pyEnvNote(workDir) {
+  const venv = ['.venv', 'venv', 'env'].find((v) => existsSync(join(workDir, v, 'pyvenv.cfg')));
+  return venv
+    ? `가상환경 감지: ${venv}/ — 실제 설치버전은 \`${venv}\\Scripts\\pip show <pkg>\`(POSIX: \`${venv}/bin/pip show\`)로 확인할 것.`
+    : '가상환경 미감지 — 활성 인터프리터의 `pip show <pkg>` 또는 `python -c "import importlib.metadata as m; print(m.version(\'<pkg>\'))"` 로 설치버전을 확인하고, 매니페스트 범위가 아니라 그 값에 맞춰 코딩할 것.';
+}
 
 async function readPythonDeps(workDir) {
   // pyproject.toml (modern)
@@ -103,7 +135,7 @@ async function readPythonDeps(workDir) {
           if (lm && lm[1] !== 'python') deps.push(`${lm[1]}==${lm[2]}`);
         }
       }
-      if (deps.length) return `**Python** (pyproject.toml)\n${deps.slice(0, 30).map(d => `  ${d}`).join('\n')}`;
+      if (deps.length) return `**Python** (pyproject.toml)\n${deps.slice(0, 30).map(d => `  ${d}`).join('\n')}\n${pyEnvNote(workDir)}`;
     } catch { /* */ }
   }
 
@@ -116,7 +148,7 @@ async function readPythonDeps(workDir) {
         .map(l => l.trim())
         .filter(l => l && !l.startsWith('#') && !l.startsWith('-'))
         .slice(0, 30);
-      if (lines.length) return `**Python** (requirements.txt)\n${lines.map(l => `  ${l}`).join('\n')}`;
+      if (lines.length) return `**Python** (requirements.txt)\n${lines.map(l => `  ${l}`).join('\n')}\n${pyEnvNote(workDir)}`;
     } catch { /* */ }
   }
 
@@ -227,10 +259,3 @@ async function readGemfileDeps(workDir) {
   }
 }
 
-// ─── Helpers ─────────────────────────────────────────────────────────────────
-
-function formatDeps(entries, limit) {
-  return entries
-    .slice(0, limit)
-    .map(([name, ver]) => `  ${name}: ${ver}`);
-}

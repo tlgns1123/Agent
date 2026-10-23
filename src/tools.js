@@ -7,7 +7,7 @@ import { spawn } from 'child_process';
 import { resolve, dirname, join, relative, isAbsolute } from 'path';
 import { tmpdir } from 'os';
 import { randomUUID } from 'crypto';
-import { wrapShellCommand, wrapCode, sandboxLabel } from './sandbox.js';
+import { wrapShellCommand, wrapCode, sandboxLabel, sandboxEnabled, stageIntoSandbox } from './sandbox.js';
 
 // ─── Sandbox ──────────────────────────────────────────────────────────────────
 // Sandbox: write/delete/edit/move ops are restricted to inside cwd.
@@ -224,6 +224,20 @@ export const TOOL_DEFINITIONS = [
           timeout: { type: 'integer', description: 'Timeout in milliseconds (default: 30000). Use higher values for long-running tasks like builds or installs.' },
         },
         required: ['command'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'stage_to_sandbox',
+      description: '호스트(윈도우) 파일을 격리 샌드박스(WSL) 안으로 복사한다. 샌드박스는 C: 드라이브가 보이지 않으므로, 바이너리 리버싱·악성샘플 분석 전에 이 도구로 대상 파일을 들여보낸 뒤 반환된 sandbox_path 를 run_command 분석 대상(file/strings/objdump/r2 등)으로 사용하라. /sandbox on(WSL) 상태에서만 동작한다.',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: '호스트 파일 경로(예: C:\\samples\\a.exe 또는 cwd 기준 상대경로)' },
+        },
+        required: ['path'],
       },
     },
   },
@@ -459,6 +473,7 @@ export async function executeTool(name, params, pluginManager = null, backupMana
     case 'edit_file':        return toolEditFile(params, backupManager);
     case 'find_files':       return toolFindFiles(params);
     case 'run_command':      return toolRunCommand(params, opts);
+    case 'stage_to_sandbox': return toolStageToSandbox(params);
     case 'search_files':     return toolSearchFiles(params);
     case 'todo_write':       return toolTodoWrite(params);
     case 'todo_read':        return toolTodoRead(params);
@@ -491,10 +506,44 @@ export async function executeTool(name, params, pluginManager = null, backupMana
 const READ_MAX_LINES = 2000;
 const READ_MAX_BYTES = 200_000;
 
+// 바이너리 매직넘버 → 포맷 라벨. 리버싱 안내에 쓴다.
+function detectMagic(buf) {
+  if (buf.length >= 4 && buf[0] === 0x7f && buf[1] === 0x45 && buf[2] === 0x4c && buf[3] === 0x46) return 'ELF';
+  if (buf.length >= 2 && buf[0] === 0x4d && buf[1] === 0x5a) return 'PE/MZ (Windows 실행파일)';
+  if (buf.length >= 4 && buf[0] === 0xcf && buf[1] === 0xfa && buf[2] === 0xed && buf[3] === 0xfe) return 'Mach-O';
+  if (buf.length >= 4 && ((buf[0] === 0xca && buf[1] === 0xfe && buf[2] === 0xba && buf[3] === 0xbe) || (buf[0] === 0xfe && buf[1] === 0xed && buf[2] === 0xfa))) return 'Mach-O';
+  if (buf.length >= 4 && buf[0] === 0x50 && buf[1] === 0x4b && buf[2] === 0x03 && buf[3] === 0x04) return 'ZIP/JAR/APK 등 압축';
+  if (buf.length >= 4 && buf[0] === 0x7f && buf.subarray(0, 4).toString('latin1') === '\x7fELF') return 'ELF';
+  return '알 수 없는 바이너리';
+}
+
 async function toolReadFile({ path: p, offset, limit, line_numbers = false }) {
   try {
     const full = resolve(process.cwd(), p);
-    const raw  = await readFile(full, 'utf-8');
+    const buf  = await readFile(full);                 // 인코딩 없이 Buffer로 먼저 읽어 바이너리 판별
+    // 바이너리 감지: 선두 영역의 NUL 바이트 또는 비텍스트 제어문자 비율
+    const probe = buf.subarray(0, 8000);
+    let nul = 0, ctrl = 0;
+    for (const b of probe) {
+      if (b === 0) nul++;
+      else if (b < 9 || (b > 13 && b < 32)) ctrl++;
+    }
+    const isBinary = probe.length > 0 && (nul > 0 || ctrl / probe.length > 0.30);
+    if (isBinary) {
+      return {
+        error: '바이너리 파일입니다 — read_file로 텍스트 읽기 불가(깨진 출력 방지).',
+        detected: 'binary',
+        magic: detectMagic(buf),
+        size_bytes: buf.length,
+        path: full,
+        hint: '리버싱/분석은 read_file 대신 분석 도구를 직접 호출해 결과를 가져와 분석하라(설명만 하지 말 것). '
+          + 'Linux 도구가 필요하면 샌드박스(/sandbox on, WSL kali)를 켠다 — 꺼져 있으면 사용자에게 켜달라고 요청. '
+          + '샌드박스는 C: 드라이브가 안 보이므로, 이 호스트 파일을 먼저 stage_to_sandbox 로 반입한 뒤 반환된 sandbox_path 를 분석 대상으로 쓴다. '
+          + '권장 순서: file → rabin2 -I(헤더·보안속성) → strings -n 6(문자열) → objdump -d 또는 r2 -q -c "aaa;pdf @ main"(디스어셈블). '
+          + '출력이 크면 함수/섹션 단위로 좁혀서(objdump -d --start-address=.. / r2 pdf @ sym.<함수>, grep) 여러 번 호출하라.',
+      };
+    }
+    const raw  = buf.toString('utf-8');
     const allLines = raw.split('\n');
     const totalLines = allLines.length;
 
@@ -1069,6 +1118,23 @@ async function toolRunCommand({ command, cwd, timeout }, opts = {}) {
     stderr: clampOutput(result.stderr, 5_000),
     sandbox: sandboxLabel(),
     ...(hint ? { hint } : {}),
+  };
+}
+
+// 호스트 파일을 샌드박스로 반입(마운트 불필요). 리버싱/악성샘플 분석의 반입 경로.
+async function toolStageToSandbox({ path: p }) {
+  if (!sandboxEnabled()) {
+    return { error: '샌드박스가 꺼져 있습니다(host 모드). 먼저 /sandbox on 으로 WSL 격리를 켜세요.',
+      hint: '켠 뒤 다시 stage_to_sandbox 를 호출하라.' };
+  }
+  const full = resolve(process.cwd(), p);
+  const r = await stageIntoSandbox(full);
+  if (!r.ok) {
+    return { error: `샌드박스 반입 실패: ${r.error}`, path: full };
+  }
+  return {
+    success: true, sandbox_path: r.sandbox_path, size_bytes: r.size_bytes, sandbox: r.sandbox,
+    hint: `반입 완료. 이제 run_command 로 이 경로를 분석하라. 예: file ${r.sandbox_path} · rabin2 -I ${r.sandbox_path} · strings -n 6 ${r.sandbox_path} · objdump -d ${r.sandbox_path} · r2 -q -c "aaa;pdf @ main" ${r.sandbox_path}`,
   };
 }
 

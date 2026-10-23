@@ -162,11 +162,12 @@ import {
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-// 기본 모델: oh-uncensor:14b — stock qwen3-14b를 QLoRA DPO로 파인튜닝해 세이프가드만
-// 외과적으로 제거(abliteration의 추론·일관성 손상 없이). 2026-10-23 게이트 합격:
-// CTF 네이티브 툴콜 6/6 · 무검열 코드생성 3/3 · CJK 0 · 한글 72%. 상세 oh-uncensor-ft/.
-// stock으로 되돌리려면 OH_MODEL=qwen3:14b 또는 /model.
-const DEFAULT_MODEL       = process.env.OH_MODEL || 'oh-uncensor:14b';
+// 기본 모델: oh-coder:30b — Qwen3-Coder-30B-A3B-Instruct(MoE 30.5B/활성3.3B, unsloth GGUF UD-Q4_K_XL).
+// 스톡이 이미 무검열(보안요청 76/76 무거부)이라 abliteration/DPO 불요. 2026-10-24 게이트 합격:
+// 코딩 결함 12/12 교정(14B가 틀린 bind/reverse·오라클방향·import누락 등) + 구문유효 4/4 ·
+// CTF 툴콜 6/6 · CJK 0 · 한글 60~82%(그라운딩/standalone). Modelfile.oh-coder-30b.
+// 이전 기본(oh-uncensor:14b)로 되돌리려면 OH_MODEL=oh-uncensor:14b, stock은 OH_MODEL=qwen3:14b 또는 /model.
+const DEFAULT_MODEL       = process.env.OH_MODEL || 'oh-coder:30b';
 // 기본 컨텍스트 길이. Phase5 실측(2026-10-17): 16384로 올려도 16GB VRAM 내 완전상주 가능.
 // env OH_NUM_CTX(기본 16384).
 const DEFAULT_NUM_CTX     = Math.max(2048, parseInt(process.env.OH_NUM_CTX ?? '16384', 10) || 16384);
@@ -340,6 +341,25 @@ async function main() {
       ? '실행 환경: Windows. run_command/run_code(shell)는 **PowerShell**로 실행된다 → PowerShell 문법을 쓸 것(예: $env:VAR, Get-ChildItem, Select-String, Test-Path; cmd 전용 set VAR=..·%VAR% 금지). 경로는 Windows식(C:\\...). Linux 도구(nmap/grep/sqlmap 등)나 bash가 필요하면 사용자가 /sandbox on(WSL kali)으로 전환한 뒤 bash 문법을 쓴다.'
       : '실행 환경: POSIX. run_command/run_code(shell)는 bash로 실행된다.';
     sp = `${sp}\n\n${shellCtx}`;
+    // 언어 규칙 — 코더 모델(영어/코드 편향)의 산문 한글 비율 보강. 코드 밖 영어 산문 억제.
+    const langCtx = '언어 규칙: 설명·분석·근거·요약 등 모든 산문은 반드시 한국어로 작성한다. '
+      + '코드·명령어·식별자·경로·로그·에러 메시지 등 기술 토큰만 원문(영어)을 유지하고, 코드 블록 밖의 영어 문장은 쓰지 않는다. '
+      + '영어 근거를 인용할 때도 설명은 한국어로 바꿔 쓴다.';
+    sp = `${sp}\n\n${langCtx}`;
+    // 리버싱/바이너리 분석 규칙 — "텍스트로 읽기"·"설명만 하고 끝내기" 실패 패턴 방지.
+    const reCtx = '바이너리 분석(리버싱): 실행파일·오브젝트·펌웨어 등은 read_file로 읽지 말 것(텍스트가 아님 → 깨짐). '
+      + 'run_command로 분석 도구를 직접 호출해 실제 결과를 가져와 분석한다 — 방법만 설명하고 끝내지 말고 네가 도구를 실행하라. '
+      + 'file/strings/nm/objdump/readelf/rabin2/r2/gdb 같은 Linux 도구는 /sandbox on(WSL kali)에서 실행된다. 샌드박스가 꺼져 있으면 먼저 사용자에게 /sandbox on 을 요청하라(호스트 Windows에선 이 도구들이 없다). '
+      + '샌드박스는 호스트 C: 드라이브가 보이지 않으므로, Windows에 있는 대상 파일은 먼저 stage_to_sandbox 도구로 반입한 뒤 반환된 sandbox_path 를 분석 대상으로 삼는다(자동 복사, 마운트 불필요·격리 유지). '
+      + '권장 순서: file → rabin2 -I(헤더·아키텍처·보안속성) → strings -n 6(문자열·상수) → objdump -d 또는 r2("aaa;pdf @ main")로 디스어셈블 → 관심 함수 상세. '
+      + '디스어셈블 출력이 크면 전부 덤프하지 말고 함수/섹션 단위로 좁혀 여러 번 호출한다(objdump -d --start-address.. / r2 pdf @ sym.<함수> / grep).';
+    sp = `${sp}\n\n${reCtx}`;
+    // 의존성 규칙 — 매니페스트 범위가 아니라 "실제 설치본"에 맞춰 코딩하고, 없으면 설치하게 한다.
+    const depCtx = '의존성 규칙: 라이브러리를 쓰기 전에 실제 설치 여부·버전을 확인하라 — Node는 `npm ls <pkg>`, Python은 `pip show <pkg>`(또는 importlib.metadata). '
+      + '위 "프로젝트 기술 스택"의 "설치" 값이 있으면 매니페스트 범위(^,~)가 아니라 그 설치 버전의 API에 맞춰 코드를 작성한다. '
+      + '필요한 패키지가 미설치면 임의로 가정하지 말고 설치하라(npm install <pkg> / pip install <pkg>) — 샌드박스 ON이면 그 안에서, OFF면 호스트에서. 설치 후 버전을 재확인한다. '
+      + '최신 버전·취약점·지원종료가 궁금하면 dependency_lookup 으로 공식 레지스트리를 조회하고 추측하지 않는다.';
+    sp = `${sp}\n\n${depCtx}`;
     const depsCtx = await buildDepsContext(process.cwd()).catch(() => null);
     if (depsCtx) sp = sp ? `${sp}\n\n${depsCtx}` : depsCtx;
     const gitCtx = await getGitContext(process.cwd()).catch(() => null);

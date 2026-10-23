@@ -476,6 +476,33 @@ export async function searchMulti(queries, { topK = 5, candidates = 30, rerank =
   return pool.sort((a, b) => b.rrf - a.rrf).slice(0, topK);
 }
 
+// 템플릿(oh-template:*) 전용 검색. 코드 생성 의도일 때 검증된 코드 구조를 우선 주입하기 위함.
+// 산문이 많은 주제(SQLi 등)에서 템플릿이 글로벌 랭킹에 밀리는 문제를 보완한다.
+// source로 DB 필터 후 템플릿 청크만 직접 코사인 랭킹(소량이라 저비용) → 산문 볼륨에 안 밀림.
+export async function searchTemplates(query, { topK = 2, prefix = 'oh-template:', minScore = 0.45 } = {}) {
+  const conn = db();
+  const rows = conn.prepare(`
+    SELECT c.body, c.heading, c.embedding, d.source, d.title, d.source_tier
+    FROM chunks c JOIN documents d ON d.id = c.doc_id
+    WHERE d.source LIKE ?`).all(`${prefix}%`);
+  if (!rows.length) return [];
+  const [qv] = await embed({ model: EMBED_MODEL, input: query });
+  // 쿼리 토큰(한글/영문/숫자, 2자+). 코드 식별자 매칭을 위해 소문자화.
+  const terms = [...new Set((query.toLowerCase().match(/[a-z0-9]{2,}|[가-힣]{2,}/g) || []))];
+  const score = (r) => {
+    const cos = cosine(qv, blobToVec(r.embedding));
+    const hay = `${r.heading || ''} ${r.body}`.toLowerCase();
+    const hits = terms.filter(t => hay.includes(t)).length;
+    const kw = terms.length ? hits / terms.length : 0;   // 키워드 겹침 비율
+    return cos + 0.25 * kw;                               // 의미+키워드 결합(헤딩/식별자 매칭 반영)
+  };
+  return rows
+    .map(r => ({ score: score(r), source: r.source, title: r.title, tier: r.source_tier, heading: r.heading, body: r.body }))
+    .filter(r => r.score >= minScore)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, topK);
+}
+
 export function stats() {
   const conn = db();
   const docs   = conn.prepare('SELECT COUNT(*) n FROM documents').get().n;

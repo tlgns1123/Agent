@@ -97,12 +97,16 @@ function isUnsupportedToolError(msg = '') {
  * @param {Function} o.dispatch      async (name, params) => result. 툴 실행(권한/스피너/스트리밍은 소비자 책임). result._denied면 중단.
  * @param {boolean}  [o.parallel]    읽기전용 툴 병렬 실행(기본 true)
  * @param {number}   [o.maxEmptyRetries]  빈응답 재시도 횟수(기본 1)
+ * @param {Function} [o.verify]      async (content) => { pass:boolean, feedback:string } | null.
+ *                                   최종 답변 직전 객관 검증(정적 게이트/실행). pass=false & feedback 있으면
+ *                                   feedback을 되먹여 재생성(self-repair). 모델무관 지상검증이므로 self-critique와 다름.
+ * @param {number}   [o.maxRepairs]  self-repair 최대 재생성 횟수(기본 0=off)
  */
 export async function* runAgentTurn(o) {
   const {
     model, messages, tools = [], options = {},
     prepare, systemPrompt = null, maxIter = 10, signal, dispatch,
-    parallel = true, maxEmptyRetries = 1,
+    parallel = true, maxEmptyRetries = 1, verify = null, maxRepairs = 0,
   } = o;
 
   const makeRequest = prepare
@@ -111,6 +115,7 @@ export async function* runAgentTurn(o) {
 
   const recent = [];        // 최근 스텝 서명(루프 감지)
   let emptyRetries = 0;
+  let repairCount = 0;      // self-repair 재생성 횟수
   let curOptions = { ...options };
 
   for (let iter = 0; iter < maxIter; iter++) {
@@ -217,6 +222,20 @@ export async function* runAgentTurn(o) {
       const r = { reason: 'empty', iterations: iter + 1, content: '' };
       yield { type: 'final', ...r };
       return r;
+    }
+
+    // ── self-repair: 최종 답변 직전 객관 검증 → 실패 시 되먹여 재생성 ──
+    if (verify && repairCount < maxRepairs) {
+      let v = null;
+      try { v = await verify(fullContent); }
+      catch (e) { yield { type: 'notice', code: 'verify-error', message: e.message }; }
+      if (v && v.pass === false && v.feedback) {
+        repairCount++;
+        yield { type: 'notice', code: 'code-repair', message: `정적/실행 검증 실패 — 재생성 ${repairCount}/${maxRepairs}` };
+        messages.push({ role: 'assistant', content: fullContent });
+        messages.push({ role: 'user', content: v.feedback });
+        continue;
+      }
     }
 
     messages.push({ role: 'assistant', content: fullContent });

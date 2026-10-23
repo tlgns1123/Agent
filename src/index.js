@@ -39,6 +39,7 @@ import { getGitContext, githubFetchIssue }           from './git.js';
 import { buildDepsContext }                          from './deps.js';
 import { verifyAnswer, presentVerification }         from './verify.js';
 import { execVerifyEnabled, runExecVerification, presentExecVerification } from './execverify.js';
+import { makeCodeVerify, codegateEnabled } from './codegate.js';
 import { sandboxEnabled, checkSandbox, sandboxLabel } from './sandbox.js';
 
 // ─── Input helpers (@images, @folders, @#issues) ──────────────────────────────
@@ -605,6 +606,27 @@ async function runAgentLoop(state, systemPrompt, signal, confirm, permAskFn) {
   const sendTools = state.allTools.length > 0 ? state.allTools.map(toOllamaTool) : [];
   const dispatch  = makeDispatch(state, confirm, permAskFn);
 
+  // ── self-repair: 최종 답변의 코드블록을 객관 검증(L1 정적 게이트 + L2 실행검증) ──
+  // 결함 발견 시 모델에 되먹여 재생성(OH_CODE_REPAIR 회, 기본 1). self-critique가 아니라
+  // ruff/bandit·실제 실행이라는 지상검증이므로 모델 맹점과 무관하다.
+  const maxRepairs = (() => { const n = parseInt(process.env.OH_CODE_REPAIR ?? '1', 10); return Number.isFinite(n) && n >= 0 ? n : 1; })();
+  const verify = (codegateEnabled() && maxRepairs > 0)
+    ? makeCodeVerify({
+        // L2: 격리 샌드박스가 켜져 있을 때만 실제 실행검증을 결합.
+        extra: (execVerifyEnabled() && !signal?.aborted)
+          ? async (content) => {
+              const x = await runExecVerification(state, { answer: content });
+              if (!x || x.verdict !== 'ran') return null;
+              const fails = x.results.filter(r => !r.skipped && r.success === false);
+              if (fails.length === 0) return { pass: true };
+              const fb = '실행검증(격리 샌드박스)에서 다음 블록이 실패했다. 오류를 고쳐 다시 완전판으로 출력하라:\n'
+                + fails.map((r, i) => `- [${r.lang}] exit ${r.exit_code ?? '?'}: ${(r.stderr || r.error || '').split('\n').slice(0, 2).join(' ').slice(0, 200)}`).join('\n');
+              return { pass: false, feedback: fb };
+            }
+          : null,
+      })
+    : null;
+
   // ── 표시 상태(스텝 단위로 think/code 필터링) ────────────────────────────
   let disp = newDisplay();
   let finalStats = null;
@@ -616,7 +638,7 @@ async function runAgentLoop(state, systemPrompt, signal, confirm, permAskFn) {
   try {
     for await (const ev of runAgentTurn({
       model: state.model, messages: state.messages, tools: sendTools, options,
-      prepare, maxIter, signal, dispatch,
+      prepare, maxIter, signal, dispatch, verify, maxRepairs,
     })) {
       switch (ev.type) {
         case 'content':
@@ -1388,19 +1410,38 @@ async function expandQueries(state, topic) {
   }
 }
 
+// 코드/PoC 생성 의도 감지 → 그라운딩 지시문 분기(엄격 Q&A vs 코드 레퍼런스).
+const CODE_INTENT_RE = /(코드|스크립트|프로그램|구현|작성해|짜줘|만들어|poc|exploit|페이로드|payload|함수|클래스|리버스\s*셸|쉘코드|shellcode|\b(python|자바스크립트|javascript|node|bash|쉘|c\+\+|golang|rust)\b|```)/i;
+function isCodeIntent(text) {
+  return CODE_INTENT_RE.test(text || '');
+}
+
 // 로컬 지식베이스에서 근거를 찾아 주입. 주입했으면 true(→ 외부검색 생략).
 async function autoInjectRag(state, topic) {
   const TIER_LABEL = { 1: '공식', 2: '커뮤니티', 3: '일반' };
   try {
-    const { searchHybrid, searchMulti, stats } = await import('./rag.js');
+    const { searchHybrid, searchMulti, searchTemplates, stats } = await import('./rag.js');
     if (stats().chunks === 0) return false;   // KB 비었으면 조용히 패스
 
     // 멀티쿼리 확장(넓은 사고) → 여러 각도로 검색 후 원 질문 기준 재채점. 확장 실패 시 단일 검색.
     const extra = await expandQueries(state, topic);
     if (extra.length) process.stderr.write(`\r  🧭 멀티쿼리 ${extra.length + 1}각도 검색…          \n`);
-    const hits = extra.length
+    let hits = extra.length
       ? await searchMulti([topic, ...extra], { topK: RAG_MAX_CHUNKS, primary: topic })
       : await searchHybrid(topic, { topK: RAG_MAX_CHUNKS });
+
+    // 코드 생성 의도면 검증된 템플릿(oh-template:*)을 앞에 우선 병합 — 산문이 많은
+    // 주제(SQLi 등)에서도 올바른 코드 구조가 반드시 컨텍스트에 들어가게 한다.
+    if (isCodeIntent(topic)) {
+      try {
+        const tmpl = await searchTemplates(topic, { topK: 2 });
+        if (tmpl.length) {
+          const seen = new Set(hits.map(h => `${h.source}#${h.heading ?? ''}`));
+          const front = tmpl.filter(t => !seen.has(`${t.source}#${t.heading ?? ''}`));
+          hits = [...front, ...hits].slice(0, RAG_MAX_CHUNKS + front.length);
+        }
+      } catch { /* 템플릿 검색 실패는 비치명적 */ }
+    }
     if (hits.length === 0) return false;
 
     const blocks = hits.map((h, i) => {
@@ -1413,10 +1454,16 @@ async function autoInjectRag(state, topic) {
 
     const lastMsg = state.messages[state.messages.length - 1];
     if (lastMsg?.role === 'user') {
+      // 의도 분기: 코드/PoC 생성이면 엄격 그라운딩("근거에 있는 것만")이 합성을 막아 역효과.
+      // → 근거를 '올바른 패턴·API·payload 레퍼런스'로 쓰되 완전한 코드를 작성하도록 지시.
+      const instruction = isCodeIntent(topic)
+        ? `✅ 아래 근거를 올바른 기법·API·payload·코드 구조의 레퍼런스로 우선 활용하라. 근거의 검증된 패턴을 따르되, 즉시 실행 가능한 완전판 코드로 작성하라(근거에 없는 배선은 표준 방식으로 보완). 근거와 모순되면 근거를 따르라.\n` +
+          `✅ 사용한 근거의 출처(문서명›섹션)·신뢰등급을 밝혀라(공식>커뮤니티>일반).\n`
+        : `🚫 아래 근거에 있는 내용만 사용할 것. 학습데이터·추측으로 보완 금지. 근거에 없으면 "지식베이스에 없음"이라고 명시할 것.\n` +
+          `✅ 답변에 사용한 근거의 출처(문서명›섹션)와 신뢰등급을 함께 밝힐 것. 공식>커뮤니티>일반 순으로 신뢰.\n`;
       lastMsg.content =
         `[지식베이스 근거 — "${topic.slice(0, 60)}"]\n` +
-        `🚫 아래 근거에 있는 내용만 사용할 것. 학습데이터·추측으로 보완 금지. 근거에 없으면 "지식베이스에 없음"이라고 명시할 것.\n` +
-        `✅ 답변에 사용한 근거의 출처(문서명›섹션)와 신뢰등급을 함께 밝힐 것. 공식>커뮤니티>일반 순으로 신뢰.\n` +
+        instruction +
         `⚠️ 반드시 한국어로 답변.\n\n` +
         `${sanitized}\n\n---\n\n` +
         lastMsg.content;

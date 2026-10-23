@@ -22,7 +22,7 @@ if (existsSync(__envPath)) {
 }
 
 import { PasteStore, buildPasteTransform, expandPasteRefs } from './pasteHandler.js';
-import { ping, listModels, streamChat, setBaseUrl } from './ollama.js';
+import { ping, ensureOllama, listModels, streamChat, setBaseUrl } from './ollama.js';
 import { TOOL_DEFINITIONS, executeTool } from './tools.js';
 import { MemoryManager }                            from './memory.js';
 import { PluginManager }                            from './plugins.js';
@@ -204,12 +204,17 @@ async function main() {
     }
   }
 
-  // ── Ollama reachability ───────────────────────────────────────────────────
-  const alive = await ping();
-  if (!alive) {
-    console.log('\n  Error: Cannot connect to Ollama.\n  Run: ollama serve\n');
+  // ── Ollama reachability (미기동이면 자동 기동 시도) ─────────────────────────
+  if (!(await ping())) process.stdout.write('\n  ⏳ Ollama 미기동 — 자동 기동 중…');
+  const health = await ensureOllama();
+  if (!health.ok) {
+    const why = health.error === 'remote-host'
+      ? '\n  원격 호스트(OLLAMA_HOST)는 자동 기동 불가 — 해당 서버에서 ollama를 켜세요.'
+      : health.started ? '\n  (자동 기동했으나 시간 내 응답 없음)' : '';
+    console.log(`\n\n  Error: Cannot connect to Ollama.${why}\n  수동 실행: ollama serve  (자동 기동 끄기: OH_AUTOSTART=off)\n`);
     process.exit(1);
   }
+  if (health.started) console.log('  \r  🟢 Ollama 자동 기동 완료.          ');
 
 // ── Subsystem init ────────────────────────────────────────────────────────
   const memory   = new MemoryManager(process.cwd());

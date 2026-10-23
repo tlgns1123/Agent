@@ -1,3 +1,5 @@
+import { spawn } from 'child_process';
+
 let BASE_URL = process.env.OLLAMA_HOST || 'http://localhost:11434';
 
 export function setBaseUrl(url) {
@@ -91,6 +93,40 @@ export async function ping() {
   } catch {
     return false;
   }
+}
+
+// BASE_URL이 로컬(localhost/127.0.0.1)을 가리키는지 — 원격 호스트면 자동 기동 의미 없음.
+function isLocalHost() {
+  try { return /^(localhost|127\.0\.0\.1|\[::1\])$/i.test(new URL(BASE_URL).hostname); }
+  catch { return false; }
+}
+
+/**
+ * Ollama 가용성 보장. 미기동이면(로컬일 때만) `ollama serve`를 분리 프로세스로 띄우고
+ * 응답할 때까지 폴링한다. OH 종료와 무관하게 서버는 남는다(unref).
+ * 반환: { ok, started, error? }
+ *   OH_AUTOSTART=off 면 자동 기동 안 함(기존처럼 ping만).
+ */
+export async function ensureOllama({ timeoutMs = 25000 } = {}) {
+  if (await ping()) return { ok: true, started: false };
+  if ((process.env.OH_AUTOSTART ?? 'on').toLowerCase() === 'off') return { ok: false, started: false };
+  if (!isLocalHost()) return { ok: false, started: false, error: 'remote-host' };
+
+  try {
+    const bin = process.env.OLLAMA_BIN || 'ollama';
+    const child = spawn(bin, ['serve'], { detached: true, stdio: 'ignore', windowsHide: true, shell: true });
+    child.on('error', () => {});   // 바이너리 없음 등은 아래 폴링 타임아웃으로 귀결
+    child.unref();
+  } catch (e) {
+    return { ok: false, started: false, error: e.message };
+  }
+
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    await new Promise(r => setTimeout(r, 600));
+    if (await ping()) return { ok: true, started: true };
+  }
+  return { ok: false, started: true, error: 'timeout' };
 }
 
 /**

@@ -40,6 +40,7 @@ import { buildDepsContext }                          from './deps.js';
 import { verifyAnswer, presentVerification }         from './verify.js';
 import { execVerifyEnabled, runExecVerification, presentExecVerification } from './execverify.js';
 import { makeCodeVerify, codegateEnabled } from './codegate.js';
+import { enqueue as teacherEnqueue, teacherEnabled } from './teacher.js';
 import { sandboxEnabled, checkSandbox, sandboxLabel } from './sandbox.js';
 
 // ─── Input helpers (@images, @folders, @#issues) ──────────────────────────────
@@ -674,6 +675,10 @@ async function runAgentLoop(state, systemPrompt, signal, confirm, permAskFn) {
           break;
         case 'final':
           turnLog.reason = ev.reason; turnLog.iterations = ev.iterations;
+          // ① 교사 루프 수집: 정상 종료한 코드 답변(L1 통과)을 논리 리뷰 큐에 적재.
+          if (ev.reason === 'plain' && teacherEnabled() && ev.content) {
+            teacherEnqueue({ model: state.model, prompt: turnLog.prompt, answer: ev.content });
+          }
           break;
       }
     }

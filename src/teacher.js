@@ -42,23 +42,76 @@ function writeJsonl(path, rows) {
 }
 
 // ── ① 수집 ──────────────────────────────────────────────────────────────────
-// 논리 리뷰 후보 조건: 코드블록 존재 + L1(정적) 통과(= 크래시류는 이미 self-repair가 처리,
-// 남은 건 '맞냐'는 논리 판단). L1 실패분은 수집 안 함(자동 수리 대상).
-export function shouldEnqueue(answer) {
-  if (!teacherEnabled()) return false;
-  const blocks = extractCodeBlocks(answer);
-  if (blocks.length === 0) return false;
-  const gate = gateAnswer(answer);
-  return gate.pass === true;   // 크래시 없는 코드 → 논리 리뷰 가치
+// 코드 산출물을 폭넓게 수집한다:
+//   (a) 최종 답변의 코드블록  (b) write_file/edit_file로 쓴 파일 코드  (c) run_code/run_command 실행
+// 중요: L1/self-repair는 최종 답변 텍스트만 검사 → 파일로 쓴 코드는 정적검사를 안 받으므로,
+//       여기서 파일 코드에도 L1을 돌려 크래시 상태를 큐에 남긴다(교사 리뷰 시 참고).
+
+const MAXCODE = 8000, MAXERR = 1200;
+const EXT_LANG = { py: 'python', js: 'node', mjs: 'node', ts: 'node', sh: 'shell', bash: 'shell' };
+const langOfPath = (p) => EXT_LANG[(p || '').split('.').pop()?.toLowerCase()] || 'text';
+
+// 턴의 tool 활동에서 코드/실행/읽기 산출물을 정규화한다.
+// tools: [{ name, params, result }]
+function normalizeTools(tools = []) {
+  const out = [];
+  for (const t of tools) {
+    const p = t.params || {}, r = t.result || {};
+    if (t.name === 'write_file' && p.content) {
+      out.push({ kind: 'write', path: p.path, lang: langOfPath(p.path), code: String(p.content).slice(0, MAXCODE) });
+    } else if (t.name === 'edit_file') {
+      const code = p.edits?.length ? p.edits.map(e => e.new_string).join('\n') : (p.new_string ?? '');
+      if (code) out.push({ kind: 'edit', path: p.path, lang: langOfPath(p.path), code: String(code).slice(0, MAXCODE) });
+    } else if (t.name === 'run_code' && p.code) {
+      out.push({ kind: 'run', lang: p.language || 'python', code: String(p.code).slice(0, MAXCODE),
+        success: r.success, exit_code: r.exit_code, stderr: String(r.stderr || r.error || '').slice(0, MAXERR) });
+    } else if (t.name === 'run_command' && p.command) {
+      out.push({ kind: 'run', lang: 'shell', code: String(p.command).slice(0, MAXCODE),
+        success: r.success, exit_code: r.exit_code, stderr: String(r.stderr || r.error || '').slice(0, MAXERR) });
+    } else if (t.name === 'read_file' && p.path) {
+      out.push({ kind: 'read', path: p.path });
+    }
+  }
+  return out;
 }
 
-export function enqueue({ model, prompt, answer }) {
+// 수집 대상 코드 조각(답변 블록 + 파일/실행 코드). L1 상태 요약 포함.
+function collectArtifacts(answer, norm) {
+  const arts = [];
+  for (const b of extractCodeBlocks(answer)) arts.push({ origin: 'answer', lang: b.lang, code: b.code });
+  for (const t of norm) if (t.code && (t.kind === 'write' || t.kind === 'edit' || t.kind === 'run')) {
+    arts.push({ origin: t.kind, lang: t.lang, code: t.code, path: t.path });
+  }
+  return arts;
+}
+
+export function shouldEnqueue(answer, tools = []) {
+  if (!teacherEnabled()) return false;
+  const norm = normalizeTools(tools);
+  const hasCode = collectArtifacts(answer, norm).length > 0;
+  const failedRun = norm.some(t => t.kind === 'run' && t.success === false);
+  return hasCode || failedRun;   // 코드 산출물 또는 실행 실패 = 리뷰 가치
+}
+
+export function enqueue({ model, prompt, answer = '', tools = [] }) {
   try {
-    if (!shouldEnqueue(answer)) return null;
+    if (!shouldEnqueue(answer, tools)) return null;
     ensureDir();
+    const norm = normalizeTools(tools);
+    const arts = collectArtifacts(answer, norm);
+    // 각 코드 조각 L1 게이트(파일 코드 포함) → 크래시 상태 요약.
+    const gated = arts.map(a => {
+      const md = '```' + (a.lang === 'text' ? '' : a.lang) + '\n' + a.code + '\n```';
+      const g = gateAnswer(md);
+      return { origin: a.origin, path: a.path, lang: a.lang,
+        l1_pass: g.pass, l1_errors: g.findings.filter(f => f.severity === 'error').map(f => `${f.code}${f.line ? ' L' + f.line : ''}`) };
+    });
+    const failedRun = norm.some(t => t.kind === 'run' && t.success === false);
     const entry = {
       id: 't_' + randomBytes(5).toString('hex'),
-      ts: Date.now(), model, prompt: (prompt || '').slice(0, 2000), answer,
+      ts: Date.now(), model, prompt: (prompt || '').slice(0, 2000), answer: (answer || '').slice(0, 12000),
+      tools: norm, artifacts: gated,
+      flags: { failed_run: failedRun, l1_fail: gated.some(a => !a.l1_pass) },
       reviewed: false,
     };
     appendFileSync(QUEUE, JSON.stringify(entry) + '\n', 'utf8');
@@ -146,12 +199,28 @@ async function cli(argv) {
   if (cmd === 'list') {
     const p = pending();
     if (!p.length) { console.log('리뷰 대기 없음.'); return; }
-    for (const e of p) console.log(`${e.id}  [${new Date(e.ts).toISOString().slice(0, 16)}]  ${e.prompt.replace(/\s+/g, ' ').slice(0, 70)}`);
-    console.log(`\n대기 ${p.length}건.`);
+    for (const e of p) {
+      const f = e.flags || {};
+      const mark = f.failed_run ? '🔴실행실패' : f.l1_fail ? '🟠L1실패' : '🟢';
+      console.log(`${e.id}  ${mark}  [${new Date(e.ts).toISOString().slice(0, 16)}]  ${(e.prompt || '').replace(/\s+/g, ' ').slice(0, 64)}`);
+    }
+    console.log(`\n대기 ${p.length}건.  (🔴/🟠 우선 리뷰 권장)`);
   } else if (cmd === 'show') {
     const e = loadQueue().find(x => x.id === rest[0]);
     if (!e) { console.log('없는 id'); return; }
-    console.log(`# ${e.id}\n## 요청\n${e.prompt}\n\n## 답변(rejected 후보)\n${e.answer}`);
+    console.log(`# ${e.id}  flags=${JSON.stringify(e.flags || {})}\n## 요청\n${e.prompt}`);
+    if (e.artifacts?.length) {
+      console.log(`\n## 코드 산출물 (L1 상태)`);
+      for (const a of e.artifacts) console.log(`  - [${a.origin}${a.path ? ' ' + a.path : ''}/${a.lang}] L1 ${a.l1_pass ? 'PASS' : 'FAIL ' + a.l1_errors.join(',')}`);
+    }
+    for (const t of (e.tools || [])) {
+      if (t.kind === 'read') { console.log(`\n## read: ${t.path}`); continue; }
+      const head = t.kind === 'run' ? `## 실행(${t.lang}) exit=${t.exit_code ?? '?'} success=${t.success}` : `## ${t.kind}: ${t.path || ''}`;
+      console.log(`\n${head}`);
+      if (t.code) console.log('```' + (t.lang === 'text' ? '' : t.lang) + '\n' + t.code + '\n```');
+      if (t.stderr) console.log(`stderr: ${t.stderr}`);
+    }
+    if (e.answer?.trim()) console.log(`\n## 최종 답변\n${e.answer}`);
   } else if (cmd === 'correct') {
     const id = rest[0];
     const f = parseFlags(rest.slice(1));
@@ -173,7 +242,8 @@ async function cli(argv) {
   }
 }
 
-// 직접 실행 시 CLI (import 시엔 미실행)
-if (import.meta.url === `file://${process.argv[1].replace(/\\/g, '/')}` || process.argv[1]?.endsWith('teacher.js')) {
+// 직접 실행 시 CLI (import 시엔 미실행). argv[1]이 없을 수 있으므로 널세이프.
+const _invoked = process.argv[1];
+if (_invoked && (import.meta.url === `file://${_invoked.replace(/\\/g, '/')}` || _invoked.endsWith('teacher.js'))) {
   cli(process.argv.slice(2)).catch(e => { console.error('오류:', e.message); process.exit(1); });
 }

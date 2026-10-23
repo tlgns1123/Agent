@@ -635,6 +635,10 @@ async function runAgentLoop(state, systemPrompt, signal, confirm, permAskFn) {
   // ── 턴 로그(JSONL) ───────────────────────────────────────────────────────
   const turnLog = { kind: 'turn', model: state.model, prompt: clip(lastUserPrompt(state), 500), steps: [], started: Date.now() };
   let curStep = null;
+  // 교사 루프 수집용: 코드/실행/읽기 관련 tool 활동을 턴 동안 모은다(전체 content 보존).
+  const teacherTools = [];
+  const TEACHER_CAPTURE = new Set(['write_file', 'edit_file', 'run_code', 'run_command', 'read_file']);
+  const teacherPrompt = lastUserPrompt(state);
 
   try {
     for await (const ev of runAgentTurn({
@@ -663,6 +667,9 @@ async function runAgentLoop(state, systemPrompt, signal, confirm, permAskFn) {
         }
         case 'tool_result':
           if (curStep) curStep.tools.push({ name: ev.name, args: clip(ev.params, 400), result: clip(resultBrief(ev.result), 600) });
+          if (teacherEnabled() && TEACHER_CAPTURE.has(ev.name)) {
+            teacherTools.push({ name: ev.name, params: ev.params, result: ev.result });
+          }
           break;
         case 'notice':
           if (ev.code === 'unsupported') {
@@ -675,9 +682,10 @@ async function runAgentLoop(state, systemPrompt, signal, confirm, permAskFn) {
           break;
         case 'final':
           turnLog.reason = ev.reason; turnLog.iterations = ev.iterations;
-          // ① 교사 루프 수집: 정상 종료한 코드 답변(L1 통과)을 논리 리뷰 큐에 적재.
-          if (ev.reason === 'plain' && teacherEnabled() && ev.content) {
-            teacherEnqueue({ model: state.model, prompt: turnLog.prompt, answer: ev.content });
+          // ① 교사 루프 수집: 코드 답변 + 파일쓰기/실행/읽기 산출물을 논리 리뷰 큐에 적재.
+          // reason 무관(파일로만 쓰고 끝낸 턴·실행 실패 턴도 캡처). enqueue가 코드 유무로 판단.
+          if (teacherEnabled()) {
+            teacherEnqueue({ model: state.model, prompt: teacherPrompt, answer: ev.content || '', tools: teacherTools });
           }
           break;
       }

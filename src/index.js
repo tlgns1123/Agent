@@ -160,10 +160,11 @@ import {
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-// 기본 모델: qwen3:14b (stock). 2026-10-23 abliterated에서 복귀 — abliteration이
-// 추론·일관성·신뢰성을 손상시켜 품질 저하 체감(사용자 과거 30b 폐기 이력과 동일).
-// 무필터가 꼭 필요한 작업만 OH_MODEL=huihui_ai/qwen3-abliterated:14b 또는 /model로 전환.
-const DEFAULT_MODEL       = process.env.OH_MODEL || 'qwen3:14b';
+// 기본 모델: oh-uncensor:14b — stock qwen3-14b를 QLoRA DPO로 파인튜닝해 세이프가드만
+// 외과적으로 제거(abliteration의 추론·일관성 손상 없이). 2026-10-23 게이트 합격:
+// CTF 네이티브 툴콜 6/6 · 무검열 코드생성 3/3 · CJK 0 · 한글 72%. 상세 oh-uncensor-ft/.
+// stock으로 되돌리려면 OH_MODEL=qwen3:14b 또는 /model.
+const DEFAULT_MODEL       = process.env.OH_MODEL || 'oh-uncensor:14b';
 // 기본 컨텍스트 길이. Phase5 실측(2026-10-17): 16384로 올려도 16GB VRAM 내 완전상주 가능.
 // env OH_NUM_CTX(기본 16384).
 const DEFAULT_NUM_CTX     = Math.max(2048, parseInt(process.env.OH_NUM_CTX ?? '16384', 10) || 16384);

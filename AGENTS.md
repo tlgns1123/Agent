@@ -49,7 +49,7 @@
 
 <!-- ooh:model-config -->
 ## 모델 설정
-- model: qwen3:14b
+- model: oh-uncensor:14b
 - context: default
 - temperature: 0.8
 - top_p: 0.9

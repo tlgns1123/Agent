@@ -7,12 +7,12 @@
  * 따라서 이 모듈은 더 이상 "라우팅"하지 않고, 에이전트 턴의 기본 상수만 제공한다.
  *
  * env:
- *   OH_MODEL_AGENT   기본 모델 (기본 qwen3:14b)
+ *   OH_MODEL_AGENT   기본 모델 (기본 oh-uncensor:14b, stock은 qwen3:14b)
  *   OH_AGENT_ITERS   에이전트 턴 최대 반복(기본 10)
  */
 
 export function agentModelName() {
-  return process.env.OH_MODEL_AGENT || 'qwen3:14b';
+  return process.env.OH_MODEL_AGENT || 'oh-uncensor:14b';
 }
 
 export function agentIters() {

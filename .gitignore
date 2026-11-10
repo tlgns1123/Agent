@@ -2,3 +2,8 @@ node_modules/
 .env
 *.log
 .oh/
+
+# 일회성 유지보수 스크립트
+._cleanup.mjs
+._*
+

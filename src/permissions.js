@@ -1,5 +1,5 @@
 /**
- * Permission system — Claude Code style.
+ * Permission system — coding-agent style.
  *
  * Every write/delete/command tool call goes through checkPermission().
  * The user sees:

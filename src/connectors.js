@@ -242,7 +242,7 @@ const GTFO_RAW = bin => `https://raw.githubusercontent.com/GTFOBins/GTFOBins.git
 
 // ─── GitHub 저장소 마크다운 일괄 적재 (지식 대량적재용) ───────────────────────
 // 트리 API 1회로 전체 파일목록 → .md만 필터(rate limit 절약). 내용은 raw로 받음(무제한).
-export async function loadGithubMarkdown(owner, repo, { branch, pathPrefix = '', onlyReadme = false, max = 100 } = {}) {
+export async function loadGithubMarkdown(owner, repo, { branch, pathPrefix = '', onlyReadme = false, max = 100, exts = ['.md'], pathPrefixes = null, excludeRe = null } = {}) {
   const headers = { Accept: 'application/vnd.github+json', 'User-Agent': 'OH-security-agent' };
   if (process.env.GITHUB_TOKEN) headers.Authorization = `Bearer ${process.env.GITHUB_TOKEN}`;
 
@@ -253,8 +253,20 @@ export async function loadGithubMarkdown(owner, repo, { branch, pathPrefix = '',
   }
   const tr = await fetch(`https://api.github.com/repos/${owner}/${repo}/git/trees/${br}?recursive=1`, { headers, signal: AbortSignal.timeout(30_000) });
   if (!tr.ok) throw new Error(`GitHub tree ${tr.status} (${owner}/${repo}@${br})`);
-  let files = (await tr.json()).tree.filter(t => t.type === 'blob' && t.path.toLowerCase().endsWith('.md'));
-  if (pathPrefix)  files = files.filter(t => t.path.startsWith(pathPrefix));
+  // 텍스트 지식 확장자 허용(.md 외 .txt/.rst/.markdown 등). exts 소문자 비교.
+  const extList = exts.map(e => e.toLowerCase());
+  let files = (await tr.json()).tree.filter(t => {
+    if (t.type !== 'blob') return false;
+    const p = t.path.toLowerCase();
+    return extList.some(e => p.endsWith(e));
+  });
+  // 경로 필터: 단일 pathPrefix 또는 복수 pathPrefixes(OR) — 대형 리포에서 핵심 경로만.
+  if (pathPrefixes && pathPrefixes.length) {
+    files = files.filter(t => pathPrefixes.some(pre => t.path.startsWith(pre)));
+  } else if (pathPrefix) {
+    files = files.filter(t => t.path.startsWith(pathPrefix));
+  }
+  if (excludeRe)   files = files.filter(t => !excludeRe.test(t.path));
   if (onlyReadme)  files = files.filter(t => t.path.toLowerCase().endsWith('readme.md'));
   files = files.slice(0, max);
   return {

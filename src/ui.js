@@ -55,7 +55,7 @@ export function printToolResult(success, message) {
   }
 }
 
-// ─── Rich file diff (Claude Code style) ───────────────────────────────────────
+// ─── Rich file diff ───────────────────────────────────────
 
 /**
  * Show a colored diff for edit_file.

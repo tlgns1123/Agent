@@ -1334,7 +1334,7 @@ async function runWebResearch(state, query) {
     const { executeTool } = await import('./tools.js');
 
     // web_research: runs multiple queries, cross-references results (pages appearing
-    // in multiple queries rank higher), fetches top pages — same approach as Claude Code.
+    // in multiple queries rank higher), fetches top pages — same approach as commercial coding agents.
     const maxSources = state.config?.search_results ?? 5;
     const res = await executeTool('web_research', { topic: query, max_sources: maxSources });
     if (res.error || !res.summary) return;

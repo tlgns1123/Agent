@@ -1,7 +1,7 @@
 {
   "name": "oh",
   "version": "0.1.0",
-  "description": "Ollama Helper — Claude Code style CLI for local Ollama models",
+  "description": "Ollama Helper — a coding-agent-style CLI for local Ollama models",
   "type": "module",
   "main": "src/index.js",
   "bin": {
